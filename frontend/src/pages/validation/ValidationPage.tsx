@@ -377,4 +377,188 @@ export function ValidationPage() {
 
             {/* Document details */}
             <div className="bg-white rounded-2xl shadow-lg p-6 space-y-4">
-              <h3 className="text-sm font-bold text-gray-500 uppercase tracking-wider flex items
+              <h3 className="text-sm font-bold text-gray-500 uppercase tracking-wider flex items-center gap-2">
+                <FileText size={14} />
+                Información del Documento
+              </h3>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <span className="text-[11px] uppercase tracking-wider text-gray-400 font-bold">ID Solicitud</span>
+                  <p className="font-mono text-sm font-semibold text-green-700 mt-0.5">{request.code}</p>
+                </div>
+                <div>
+                  <span className="text-[11px] uppercase tracking-wider text-gray-400 font-bold">Tipo de Documento</span>
+                  <p className="text-sm font-semibold text-gray-800 mt-0.5">{template?.name || 'Certificado'}</p>
+                </div>
+                <div>
+                  <span className="text-[11px] uppercase tracking-wider text-gray-400 font-bold">Solicitante</span>
+                  <p className="text-sm font-semibold text-gray-800 mt-0.5">{request.user?.first_name} {request.user?.last_name}</p>
+                </div>
+                {request.user?.document_id && (
+                  <div>
+                    <span className="text-[11px] uppercase tracking-wider text-gray-400 font-bold">Documento</span>
+                    <p className="text-sm font-semibold text-gray-800 mt-0.5">{request.user.document_id}</p>
+                  </div>
+                )}
+                <div>
+                  <span className="text-[11px] uppercase tracking-wider text-gray-400 font-bold">Fecha de Emisión</span>
+                  <p className="text-sm text-gray-600 mt-0.5">
+                    {request.reviewed_at
+                      ? new Date(request.reviewed_at).toLocaleDateString('es-CO', { day: 'numeric', month: 'long', year: 'numeric' })
+                      : '—'}
+                  </p>
+                </div>
+                <div>
+                  <span className="text-[11px] uppercase tracking-wider text-gray-400 font-bold">Fecha de Creación</span>
+                  <p className="text-sm text-gray-600 mt-0.5">
+                    {new Date(request.created_at).toLocaleDateString('es-CO', { day: 'numeric', month: 'long', year: 'numeric' })}
+                  </p>
+                </div>
+                {request.consecutive_number && (
+                  <div>
+                    <span className="text-[11px] uppercase tracking-wider text-gray-400 font-bold">Radicado</span>
+                    <p className="font-mono text-sm font-semibold text-gray-800 mt-0.5">{request.consecutive_number}</p>
+                  </div>
+                )}
+                {request.type === 'MASSIVE' && request.batch_id && (
+                  <div>
+                    <span className="text-[11px] uppercase tracking-wider text-gray-400 font-bold">Lote</span>
+                    <p className="text-sm text-gray-600 mt-0.5">
+                      #{request.batch_id.substring(0, 8).toUpperCase()} ({request.batch_total} solicitudes)
+                    </p>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Reviewer / Signature Info — sin imagen de firma */}
+            {reviewerInfo && (
+              <div className="bg-white rounded-2xl shadow-lg p-6 space-y-3">
+                <h3 className="text-sm font-bold text-gray-500 uppercase tracking-wider flex items-center gap-2">
+                  <User size={14} />
+                  Aprobado por
+                </h3>
+                <div className="flex items-center gap-4">
+                  <div className="w-14 h-14 rounded-full bg-blue-100 flex items-center justify-center shrink-0">
+                    <User size={24} className="text-blue-600" />
+                  </div>
+                  <div>
+                    <p className="font-semibold text-gray-800">{reviewerInfo.signature_name || 'Firmante autorizado'}</p>
+                    {reviewerInfo.signature_title && (
+                      <p className="text-sm text-gray-500">{reviewerInfo.signature_title}</p>
+                    )}
+                    <div className="flex items-center gap-1 mt-1">
+                      <div className="w-1.5 h-1.5 rounded-full bg-green-500" />
+                      <span className="text-xs text-green-600 font-medium">Firma digital registrada</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* QR Code */}
+            <div className="bg-white rounded-2xl shadow-lg p-6 text-center">
+              <h3 className="text-sm font-bold text-gray-500 uppercase tracking-wider mb-3 flex items-center justify-center gap-2">
+                <Shield size={14} />
+                Código de Verificación
+              </h3>
+              <div className="flex justify-center mb-2">
+                <div className="p-3 bg-white border border-gray-200 rounded-xl inline-block">
+                  <QRCodeCanvas
+                    value={validationUrl}
+                    size={120}
+                    bgColor="#ffffff"
+                    fgColor="#15803d"
+                    level="M"
+                  />
+                </div>
+              </div>
+              <p className="text-xs text-gray-400 font-mono break-all max-w-md mx-auto">
+                {validationUrl}
+              </p>
+              <p className="text-xs text-gray-400 mt-2">
+                Escanea el código QR para verificar este documento
+              </p>
+            </div>
+
+            {/* Rejection reason */}
+            {request.status === 'REJECTED' && request.rejection_reason && (
+              <div className="bg-red-50 rounded-2xl p-6 border border-red-200">
+                <h3 className="text-sm font-bold text-red-700 uppercase tracking-wider mb-2 flex items-center gap-2">
+                  <XCircle size={14} />
+                  Motivo de Rechazo
+                </h3>
+                <p className="text-sm text-red-600">{request.rejection_reason}</p>
+              </div>
+            )}
+
+            {/* Certificate preview — solo para aprobados/firmados */}
+            {isApproved && templateConfig && (
+              <div className="bg-white rounded-2xl shadow-lg p-6 space-y-4">
+                <h3 className="text-sm font-bold text-gray-500 uppercase tracking-wider flex items-center gap-2">
+                  <FileText size={14} />
+                  Certificado Electrónico
+                </h3>
+                <div className="flex justify-center">
+                  <div
+                    ref={certificateRef}
+                    className="bg-white shadow-xl rounded-sm overflow-hidden relative"
+                    style={{
+                      width: pageWidth * certScale,
+                      height: pageHeight * certScale,
+                    }}
+                  >
+                    {elements.map((el: any, i: number) => renderElement(el, i))}
+                    {elements.length === 0 && (
+                      <div className="absolute inset-0 flex items-center justify-center text-gray-400">
+                        <div className="text-center">
+                          <FileText size={40} className="mx-auto mb-2 opacity-40" />
+                          <p className="text-sm font-medium">Sin elementos en la plantilla</p>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+                <div className="flex justify-center">
+                  <button
+                    onClick={handleDownloadPdf}
+                    disabled={pdfLoading}
+                    className="inline-flex items-center gap-2 px-8 py-3 bg-green-700 text-white font-bold rounded-xl hover:bg-green-800 transition-colors shadow-lg disabled:opacity-60 disabled:cursor-not-allowed"
+                  >
+                    {pdfLoading ? (
+                      <>
+                        <Loader2 size={20} className="animate-spin" />
+                        Generando PDF...
+                      </>
+                    ) : (
+                      <>
+                        <Download size={20} />
+                        Descargar Certificado (PDF)
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Footer */}
+            <div className="text-center pt-4">
+              <p className="text-xs text-gray-400">
+                Este documento fue verificado electrónicamente mediante el sistema VERIX.
+                {isApproved && ' Su integridad y autenticidad están garantizadas.'}
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* Powered by */}
+        <div className="text-center mt-8">
+          <p className="text-xs text-gray-400">
+            Powered by <span className="font-semibold text-green-700">VERIX</span> · Sistema de Certificación Digital
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
