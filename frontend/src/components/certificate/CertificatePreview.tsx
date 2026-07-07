@@ -227,7 +227,7 @@ export function CertificatePreview({
       const pdfWidth = pdf.internal.pageSize.getWidth();
       const pdfHeight = pdf.internal.pageSize.getHeight();
 
-      pdf.addImage(imgData, 'JPEG', 0, 0, pdfWidth, pdfHeight);
+      pdf.addImage(imgData, 'PNG', 0, 0, pdfWidth, pdfHeight);
       pdf.save(`certificado-${requestCode || requestId.substring(0, 8)}.pdf`);
 
       toast.success('✅ PDF descargado', { id: 'pdf-gen' });
@@ -250,7 +250,7 @@ export function CertificatePreview({
       const imgData = canvas.toDataURL('image/png');
       const orientation = pageOrientation === 'landscape' ? 'l' : 'p';
       const pdf = new jsPDF(orientation, 'px', [pageWidth, pageHeight]);
-      pdf.addImage(imgData, 'JPEG', 0, 0, pdf.internal.pageSize.getWidth(), pdf.internal.pageSize.getHeight());
+      pdf.addImage(imgData, 'PNG', 0, 0, pdf.internal.pageSize.getWidth(), pdf.internal.pageSize.getHeight());
       const pdfBytes = new Uint8Array(pdf.output('arraybuffer'));
       let binary = '';
       for (let i = 0; i < pdfBytes.length; i++) binary += String.fromCharCode(pdfBytes[i]);
