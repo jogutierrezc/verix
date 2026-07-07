@@ -2,8 +2,8 @@ import { useState, useEffect, useRef } from 'react';
 import { supabase } from '../../lib/supabase';
 import { X, CheckCircle, XCircle, Download, FileText, Loader2, Signature, Printer } from 'lucide-react';
 import { QRCodeCanvas } from 'qrcode.react';
+import QRCode from 'qrcode';
 import toast from 'react-hot-toast';
-import html2canvas from 'html2canvas';
 import jsPDF from 'jspdf';
 import type { TemplateElement } from '../editor/TemplateCanvas';
 
@@ -84,6 +84,169 @@ function fillTemplate(content: string, data: Record<string, any>): string {
 
 // Safe JSON parse helper
 const safeJsonParse = (str: string) => { try { return JSON.parse(str); } catch { return {}; } };
+
+// ── Direct PDF generation (no html2canvas) ──
+
+/** Font family mapping from CSS to jsPDF built-in fonts */
+const FONT_MAP: Record<string, string> = {
+  serif: 'times',
+  'times new roman': 'times',
+  georgia: 'times',
+  palatino: 'times',
+  'book antiqua': 'times',
+  sans: 'helvetica',
+  'sans-serif': 'helvetica',
+  arial: 'helvetica',
+  helvetica: 'helvetica',
+  verdana: 'helvetica',
+  tahoma: 'helvetica',
+  'trebuchet ms': 'helvetica',
+  monospace: 'courier',
+  'courier new': 'courier',
+  consolas: 'courier',
+};
+
+function mapFont(fontFamily?: string): string {
+  if (!fontFamily) return 'times';
+  return FONT_MAP[fontFamily.toLowerCase().trim()] || 'times';
+}
+
+function mapFontStyle(bold?: boolean, italic?: boolean): string {
+  if (bold && italic) return 'bolditalic';
+  if (bold) return 'bold';
+  if (italic) return 'italic';
+  return 'normal';
+}
+
+function hexToRgb(hex: string): [number, number, number] {
+  const clean = hex.replace('#', '');
+  return [
+    parseInt(clean.substring(0, 2), 16),
+    parseInt(clean.substring(2, 4), 16),
+    parseInt(clean.substring(4, 6), 16),
+  ];
+}
+
+/** Load a remote image and return a data URL (base64) */
+async function loadImageToDataUrl(url: string): Promise<string | null> {
+  try {
+    const response = await fetch(url, { mode: 'cors' });
+    if (!response.ok) return null;
+    const blob = await response.blob();
+    return new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onloadend = () => resolve(reader.result as string);
+      reader.onerror = () => resolve(null);
+      reader.readAsDataURL(blob);
+    });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Generates a PDF by rendering each template element directly with jsPDF.
+ * No html2canvas involved — text is vector, images are native resolution.
+ */
+async function renderTemplateToPdf(
+  elements: TemplateElement[],
+  pageOrientation: string,
+  pageWidth: number,
+  pageHeight: number,
+  requestData: Record<string, any>,
+  selectedSignature: { signature_image_url?: string } | null,
+): Promise<jsPDF> {
+  const orientation = pageOrientation === 'landscape' ? 'l' : 'p';
+  const pdf = new jsPDF(orientation, 'pt', [pageWidth, pageHeight]);
+  const PADDING = 5; // pt padding inside element bounds
+
+  for (const el of elements) {
+    const content = fillTemplate(el.content, requestData);
+    const x = el.x;
+    const y = el.y;
+    const w = el.width;
+    const h = el.height;
+    const color = el.color || '#191c1e';
+    const rgb = hexToRgb(color);
+
+    try {
+      switch (el.type) {
+        case 'text':
+        case 'date':
+        case 'consecutive': {
+          const fontSize = el.fontSize || 14;
+          if (content) {
+            pdf.setFont(mapFont(el.fontFamily), mapFontStyle(el.bold, el.italic));
+            pdf.setFontSize(fontSize);
+            pdf.setTextColor(rgb[0], rgb[1], rgb[2]);
+            pdf.text(content, x + PADDING, y + PADDING, {
+              maxWidth: w - PADDING * 2,
+              align: el.align || 'left',
+              baseline: 'top',
+            });
+          }
+          break;
+        }
+
+        case 'image': {
+          if (el.imageUrl) {
+            const imgData = await loadImageToDataUrl(el.imageUrl);
+            if (imgData) {
+              const fmt = imgData.startsWith('data:image/png') ? 'PNG' : 'JPEG';
+              pdf.addImage(imgData, fmt, x, y, w, h);
+            }
+          }
+          break;
+        }
+
+        case 'qr': {
+          try {
+            const qrDataUrl = await QRCode.toDataURL(content || ' ', {
+              width: Math.round(Math.min(w, h) * 4),
+              margin: 1,
+              color: { dark: '#006e2f', light: '#ffffff' },
+            });
+            const qrSize = Math.min(w, h) * 0.9;
+            const qrX = x + (w - qrSize) / 2;
+            const qrY = y + (h - qrSize) / 2;
+            pdf.addImage(qrDataUrl, 'PNG', qrX, qrY, qrSize, qrSize);
+          } catch {
+            // QR generation failed, skip
+          }
+          break;
+        }
+
+        case 'signature': {
+          if (selectedSignature?.signature_image_url) {
+            const imgData = await loadImageToDataUrl(selectedSignature.signature_image_url);
+            if (imgData) {
+              pdf.addImage(imgData, 'PNG', x, y, w, h);
+            }
+          }
+          break;
+        }
+
+        case 'line': {
+          pdf.setDrawColor(rgb[0], rgb[1], rgb[2]);
+          pdf.setLineWidth(0.5);
+          pdf.line(x, y + h / 2, x + w, y + h / 2);
+          break;
+        }
+
+        case 'shape': {
+          pdf.setDrawColor(rgb[0], rgb[1], rgb[2]);
+          pdf.setLineWidth(0.5);
+          pdf.rect(x, y, w, h);
+          break;
+        }
+      }
+    } catch (err) {
+      console.warn(`⚠️ Error rendering element ${el.id || el.type}:`, err);
+    }
+  }
+
+  return pdf;
+}
 
 export function CertificatePreview({
   requestId,
@@ -208,40 +371,23 @@ export function CertificatePreview({
   };
 
   const handleDownloadPdf = async () => {
-    if (!certificateRef.current) return;
-
     try {
       toast.loading('Generando PDF...', { id: 'pdf-gen' });
 
-      // Calculate optimal scale for 300 DPI at the target page size
-      // The preview element is rendered at previewScale (0.55) of its real size
-      // We need: elementWidth * scale >= pageWidth * (300 / 72)
-      const elementWidth = certificateRef.current.clientWidth;
-      const targetDPI = 300;
-      const pointsPerInch = 72;
-      const physicalWidthInches = pageWidth / pointsPerInch;
-      const targetPixels = Math.round(physicalWidthInches * targetDPI);
-      const optimalScale = Math.ceil(targetPixels / elementWidth);
-      // Cap at a reasonable max to avoid browser crashes on large captures
-      const captureScale = Math.min(optimalScale, 8);
+      const selectedSig = selectedSignatureId
+        ? signatures.find(s => s.id === selectedSignatureId) || null
+        : null;
 
-      const canvas = await html2canvas(certificateRef.current, {
-        scale: captureScale,
-        useCORS: true,
-        backgroundColor: '#ffffff',
-        logging: false,
-      });
+      const pdf = await renderTemplateToPdf(
+        elements,
+        pageOrientation,
+        pageWidth,
+        pageHeight,
+        requestData,
+        selectedSig,
+      );
 
-      const imgData = canvas.toDataURL('image/png');
-      const orientation = pageOrientation === 'landscape' ? 'l' : 'p';
-      const pdf = new jsPDF(orientation, 'px', [pageWidth, pageHeight]);
-
-      const pdfWidth = pdf.internal.pageSize.getWidth();
-      const pdfHeight = pdf.internal.pageSize.getHeight();
-
-      pdf.addImage(imgData, 'PNG', 0, 0, pdfWidth, pdfHeight);
       pdf.save(`certificado-${requestCode || requestId.substring(0, 8)}.pdf`);
-
       toast.success('✅ PDF descargado', { id: 'pdf-gen' });
     } catch (err: any) {
       toast.error('Error al generar PDF: ' + (err.message || 'Error desconocido'), { id: 'pdf-gen' });
@@ -249,27 +395,22 @@ export function CertificatePreview({
     }
   };
 
-  /** Genera el PDF del certificado y devuelve la imagen como base64 */
+  /** Genera el PDF directamente (vector/texto) y lo devuelve como base64 para firma digital */
   const generatePdfBase64 = async (): Promise<string | null> => {
-    if (!certificateRef.current) return null;
     try {
-      // Calculate optimal scale for ~200 DPI (lower than download to fit Edge Function payload ~6MB)
-      const elementWidth = certificateRef.current.clientWidth;
-      const physicalWidthInches = pageWidth / 72;
-      const targetPixels = Math.round(physicalWidthInches * 200);
-      const optimalScale = Math.ceil(targetPixels / elementWidth);
-      const captureScale = Math.min(optimalScale, 6);
+      const selectedSig = selectedSignatureId
+        ? signatures.find(s => s.id === selectedSignatureId) || null
+        : null;
 
-      const canvas = await html2canvas(certificateRef.current, {
-        scale: captureScale,
-        useCORS: true,
-        backgroundColor: '#ffffff',
-        logging: false,
-      });
-      const imgData = canvas.toDataURL('image/png');
-      const orientation = pageOrientation === 'landscape' ? 'l' : 'p';
-      const pdf = new jsPDF(orientation, 'px', [pageWidth, pageHeight]);
-      pdf.addImage(imgData, 'PNG', 0, 0, pdf.internal.pageSize.getWidth(), pdf.internal.pageSize.getHeight());
+      const pdf = await renderTemplateToPdf(
+        elements,
+        pageOrientation,
+        pageWidth,
+        pageHeight,
+        requestData,
+        selectedSig,
+      );
+
       const pdfBytes = new Uint8Array(pdf.output('arraybuffer'));
       let binary = '';
       for (let i = 0; i < pdfBytes.length; i++) binary += String.fromCharCode(pdfBytes[i]);
