@@ -237,6 +237,87 @@ export function CertificatePreview({
     }
   };
 
+  /** Genera el PDF del certificado y devuelve la imagen como base64 */
+  const generatePdfBase64 = async (): Promise<string | null> => {
+    if (!certificateRef.current) return null;
+    try {
+      const canvas = await html2canvas(certificateRef.current, {
+        scale: 3,
+        useCORS: true,
+        backgroundColor: '#ffffff',
+        logging: false,
+      });
+      const imgData = canvas.toDataURL('image/jpeg', 0.98);
+      const orientation = pageOrientation === 'landscape' ? 'l' : 'p';
+      const pdf = new jsPDF(orientation, 'px', [pageWidth, pageHeight]);
+      pdf.addImage(imgData, 'JPEG', 0, 0, pdf.internal.pageSize.getWidth(), pdf.internal.pageSize.getHeight());
+      const pdfBytes = new Uint8Array(pdf.output('arraybuffer'));
+      let binary = '';
+      for (let i = 0; i < pdfBytes.length; i++) binary += String.fromCharCode(pdfBytes[i]);
+      return btoa(binary);
+    } catch (err) {
+      console.error('Error generating PDF:', err);
+      return null;
+    }
+  };
+
+  /** Intenta la firma digital con sign-pdf Edge Function */
+  const tryDigitalSigning = async (): Promise<boolean> => {
+    try {
+      // 1. Check if user has a P12 certificate
+      const { data: p12Cert } = await supabase
+        .from('user_certificates')
+        .select('id')
+        .eq('user_id', userId)
+        .eq('is_active', true)
+        .limit(1)
+        .maybeSingle();
+
+      if (!p12Cert) return false; // No P12 cert, skip digital signing
+
+      // 2. Generate PDF as base64
+      const pdfBase64 = await generatePdfBase64();
+      if (!pdfBase64) return false;
+
+      // 3. Prepare reviewer notes
+      let reviewerNotes: string | undefined;
+      if (selectedSignatureId) {
+        const selectedSig = signatures.find(s => s.id === selectedSignatureId);
+        if (selectedSig) {
+          reviewerNotes = JSON.stringify({
+            signature_id: selectedSignatureId,
+            signature_name: selectedSig.full_name,
+            signature_title: selectedSig.title,
+            signature_url: selectedSig.signature_image_url,
+          });
+        }
+      }
+
+      // 4. Call sign-pdf Edge Function
+      const { error: fnError, data: result } = await supabase.functions.invoke('sign-pdf', {
+        body: {
+          request_id: requestId,
+          user_id: userId,
+          pdf_base64: pdfBase64,
+          reviewed_by: userId,
+          reviewer_notes: reviewerNotes,
+          consecutive_number: generatedRadicado?.code,
+        },
+      });
+
+      if (fnError) {
+        console.warn('⚠️ Firma digital falló, usando flujo manual:', fnError);
+        return false;
+      }
+
+      console.log('✅ PDF firmado digitalmente:', result);
+      return true;
+    } catch (err) {
+      console.warn('⚠️ Error en firma digital, usando flujo manual:', err);
+      return false;
+    }
+  };
+
   const handleApprove = async () => {
     if (!selectedSignatureId && signatures.length > 0) {
       toast.error('Selecciona una firma para aprobar');
@@ -245,18 +326,28 @@ export function CertificatePreview({
 
     setApproving(true);
     try {
+      // Try digital signing first (P12 certificate)
+      const signed = await tryDigitalSigning();
+
+      if (signed) {
+        // Digital signing handled everything (status, certificate_url, etc.)
+        toast.success('✅ Solicitud aprobada y firmada digitalmente');
+        onApproved();
+        onClose();
+        return;
+      }
+
+      // ── Fallback: manual approval flow ──
       const updateData: any = {
         status: 'APPROVED',
         reviewed_by: userId,
         reviewed_at: new Date().toISOString(),
       };
 
-      // Add radicado if generated
       if (generatedRadicado) {
         updateData.consecutive_number = generatedRadicado.code;
       }
 
-      // Add signature info if selected
       if (selectedSignatureId) {
         const selectedSig = signatures.find(s => s.id === selectedSignatureId);
         if (selectedSig) {
@@ -276,6 +367,11 @@ export function CertificatePreview({
 
       if (error) throw error;
       toast.success('✅ Solicitud aprobada');
+
+      if (userRole === 'SIGNER' || userRole === 'ADMIN') {
+        toast('💡 ¿Tienes un certificado P12? Configúralo en Ajustes > Firma para firmar digitalmente.', { icon: '🔐' });
+      }
+
       onApproved();
       onClose();
     } catch (err: any) {
