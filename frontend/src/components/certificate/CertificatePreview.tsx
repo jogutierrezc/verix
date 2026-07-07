@@ -214,13 +214,13 @@ export function CertificatePreview({
       toast.loading('Generando PDF...', { id: 'pdf-gen' });
 
       const canvas = await html2canvas(certificateRef.current, {
-        scale: 3, // High resolution for print
+        scale: 4, // Ultra-high resolution for print
         useCORS: true,
         backgroundColor: '#ffffff',
         logging: false,
       });
 
-      const imgData = canvas.toDataURL('image/jpeg', 0.98);
+      const imgData = canvas.toDataURL('image/png');
       const orientation = pageOrientation === 'landscape' ? 'l' : 'p';
       const pdf = new jsPDF(orientation, 'px', [pageWidth, pageHeight]);
 
@@ -242,12 +242,12 @@ export function CertificatePreview({
     if (!certificateRef.current) return null;
     try {
       const canvas = await html2canvas(certificateRef.current, {
-        scale: 3,
+        scale: 3, // High resolution for digital signing (PNG + scale 3 to fit Edge Function payload limit)
         useCORS: true,
         backgroundColor: '#ffffff',
         logging: false,
       });
-      const imgData = canvas.toDataURL('image/jpeg', 0.98);
+      const imgData = canvas.toDataURL('image/png');
       const orientation = pageOrientation === 'landscape' ? 'l' : 'p';
       const pdf = new jsPDF(orientation, 'px', [pageWidth, pageHeight]);
       pdf.addImage(imgData, 'JPEG', 0, 0, pdf.internal.pageSize.getWidth(), pdf.internal.pageSize.getHeight());
