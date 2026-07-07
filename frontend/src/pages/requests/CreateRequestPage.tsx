@@ -12,6 +12,32 @@ const SYSTEM_VARS = new Set(['codigo', 'codigo_certificado', 'radicado', 'consec
 
 type CreationType = 'single' | 'multiple';
 
+const extractTemplateVariables = (template: any): string[] => {
+  if (template?.config && Array.isArray(template.config.elements)) {
+    const regex = /{{\s*([^}\s]+)\s*}}/g;
+    const vars = new Set<string>();
+
+    template.config.elements.forEach((el: any) => {
+      if (typeof el.content === 'string') {
+        let match: RegExpExecArray | null;
+        while ((match = regex.exec(el.content)) !== null) {
+          vars.add(match[1]);
+        }
+      }
+    });
+
+    if (vars.size > 0) {
+      return Array.from(vars);
+    }
+  }
+
+  if (template?.variables && Array.isArray(template.variables)) {
+    return template.variables;
+  }
+
+  return [];
+};
+
 export function CreateRequestPage() {
   const { user } = useAuth();
   const navigate = useNavigate();
@@ -46,17 +72,19 @@ export function CreateRequestPage() {
   const loadTemplates = async () => {
     setLoadingTemplates(true);
     try {
-      let query = supabase
-        .from('templates')
-        .select('id, name, code, description, variables, category')
-        .eq('is_active', true)
-        .order('name');
-
-      if (user?.institution_id) {
-        query = query.eq('institution_id', user.institution_id);
+      // Only show templates assigned to the user's dependency
+      if (!user?.dependency_id) {
+        setTemplates([]);
+        return;
       }
 
-      const { data } = await query;
+      const { data } = await supabase
+        .from('templates')
+        .select('id, name, code, description, variables, category, config')
+        .eq('is_active', true)
+        .eq('dependency_id', user.dependency_id)
+        .order('name');
+
       setTemplates(data || []);
     } catch (err) {
       console.error('Error loading templates:', err);
@@ -73,8 +101,8 @@ export function CreateRequestPage() {
     setColumnMapping({});
 
     const template = templates.find(t => t.id === templateId);
-    if (template?.variables) {
-      const vars = Array.isArray(template.variables) ? template.variables : [];
+    if (template) {
+      const vars = extractTemplateVariables(template);
       setTemplateVars(vars);
 
       // Filter out system variables from the form
@@ -114,13 +142,17 @@ export function CreateRequestPage() {
     try {
       const code = `REQ-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).substring(2, 6).toUpperCase()}`;
 
+      const dataToSend = Object.fromEntries(
+        Object.entries(formData).filter(([_key, value]) => value !== ''),
+      );
+
       await requestsApi.create({
         code,
         type: 'INDIVIDUAL',
         status: 'PENDING',
         user_id: user?.id,
         template_id: selectedTemplate,
-        data: formData,
+        data: dataToSend,
       });
 
       toast.success('Solicitud creada exitosamente');
@@ -185,13 +217,6 @@ export function CreateRequestPage() {
       return;
     }
 
-    // Validate mapping (only check visible fields, system vars are auto-assigned)
-    const unmapped = filteredVars.filter(v => !Object.values(columnMapping).includes(v));
-    if (unmapped.length > 0) {
-      toast.error(`Falta mapear: ${unmapped.join(', ')}`);
-      return;
-    }
-
     setImporting(true);
     setImportProgress({ current: 0, total: excelData.length });
 
@@ -202,7 +227,11 @@ export function CreateRequestPage() {
     const allRows = excelData.map((row, i) => {
       const mappedData: Record<string, string> = {};
       Object.entries(columnMapping).forEach(([excelCol, templateVar]) => {
-        mappedData[templateVar] = row[excelCol] || '';
+        if (!templateVar) return;
+        const value = row[excelCol];
+        if (value !== undefined && value !== null && String(value).trim() !== '') {
+          mappedData[templateVar] = String(value);
+        }
       });
 
       const code = `MAS-${batchId.substring(0, 6).toUpperCase()}-${String(i + 1).padStart(4, '0')}`;

@@ -14,7 +14,7 @@ import {
   Italic,
   AlignLeft,
   AlignCenter,
-  AlignRight, AlignJustify, Move, Maximize, Type,
+  AlignRight, AlignJustify, Move, Maximize, Type, Layers
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 
@@ -25,13 +25,10 @@ const CERTIFICATE_VARIABLES = [
   { key: 'documento_estudiante', label: 'No. Documento', desc: 'Número de identificación' },
   { key: 'tipo_seminario', label: 'Tipo de Seminario', desc: 'Nombre del seminario/curso' },
   { key: 'intensidad_horaria', label: 'Intensidad Horaria', desc: 'Horas del curso (ej: 40 horas)' },
-  { key: 'nota', label: 'Nota Obtenida', desc: 'Calificación del estudiante' },
   { key: 'estado_evaluacion', label: 'Estado Evaluación', desc: 'Aprobado/Reprobado' },
   { key: 'fecha_inicio', label: 'Fecha de Inicio', desc: 'Inicio del periodo académico' },
   { key: 'fecha_terminacion', label: 'Fecha de Terminación', desc: 'Fin del periodo académico' },
   { key: 'fecha_certificacion', label: 'Fecha de Certificación', desc: 'Fecha de expedición del certificado' },
-  { key: 'institucion', label: 'Institución', desc: 'Nombre de la institución' },
-  { key: 'ciudad', label: 'Ciudad', desc: 'Ciudad de expedición' },
 ];
 
 const FONT_SIZES = [8, 9, 10, 11, 12, 14, 16, 18, 20, 22, 24, 28, 32, 36, 42, 48];
@@ -316,6 +313,8 @@ export function TemplateEditorPage() {
   const [orientation, setOrientation] = useState<'portrait' | 'landscape'>('landscape');
   const [elements, setElements] = useState<TemplateElement[]>([]);
   const [logoUrl, setLogoUrl] = useState<string>('');
+  const [dependencyId, setDependencyId] = useState('');
+  const [dependencies, setDependencies] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [showVariables, setShowVariables] = useState(true);
@@ -324,6 +323,23 @@ export function TemplateEditorPage() {
   const [newCustomVarName, setNewCustomVarName] = useState('');
 
   const selectedElement = elements.find((el) => el.id === selectedElementId) || null;
+
+  // Load dependencies for the selector
+  useEffect(() => {
+    loadDependencies();
+  }, []);
+
+  const loadDependencies = async () => {
+    try {
+      const { data } = await supabase
+        .from('dependencies')
+        .select('id, name, code')
+        .order('name');
+      setDependencies(data || []);
+    } catch (err) {
+      console.error('Error loading dependencies:', err);
+    }
+  };
 
   useEffect(() => {
     if (templateId) loadTemplate();
@@ -339,6 +355,7 @@ export function TemplateEditorPage() {
         setCode(data.code);
         setCategory(data.category || 'certificate');
         setOrientation(data.orientation as 'portrait' | 'landscape');
+        setDependencyId(data.dependency_id || '');
         const config = data.config as any;
         setElements(config?.elements || []);
         setLogoUrl(config?.logoUrl || '');
@@ -458,6 +475,7 @@ export function TemplateEditorPage() {
 
   const handleSave = async () => {
     if (!name || !code) { toast.error('Nombre y código requeridos'); return; }
+    if (!dependencyId) { toast.error('Debes seleccionar una dependencia'); return; }
 
     setSaving(true);
     try {
@@ -466,6 +484,7 @@ export function TemplateEditorPage() {
         code,
         category,
         orientation,
+        dependency_id: dependencyId,
         config: {
           elements,
           logoUrl,
@@ -593,6 +612,26 @@ export function TemplateEditorPage() {
                     </label>
                   )}
                 </div>
+              </div>
+
+              <hr className="border-outline-variant/30" />
+
+              {/* Dependency Selector */}
+              <div>
+                <h4 className="text-label-sm font-bold text-on-surface-variant uppercase tracking-wider mb-3 flex items-center gap-2">
+                  <Layers size={16} />
+                  Dependencia
+                </h4>
+                <select
+                  className="input w-full"
+                  value={dependencyId}
+                  onChange={e => setDependencyId(e.target.value)}
+                >
+                  <option value="">Seleccionar dependencia...</option>
+                  {dependencies.map(d => (
+                    <option key={d.id} value={d.id}>{d.name} {d.code ? `(${d.code})` : ''}</option>
+                  ))}
+                </select>
               </div>
 
               <hr className="border-outline-variant/30" />

@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
+import { useAuth } from '../../hooks/useAuth';
 import { supabase } from '../../lib/supabase';
 import {
   Plus, Search, Hash, Trash2, Edit3, Building2, Layers, X
@@ -9,6 +10,7 @@ import { format } from 'date-fns';
 import { es } from 'date-fns/locale';
 
 export function RadicadosPage() {
+  const { user } = useAuth();
   const [radicados, setRadicados] = useState<any[]>([]);
   const [institutions, setInstitutions] = useState<any[]>([]);
   const [templates, setTemplates] = useState<any[]>([]);
@@ -33,7 +35,7 @@ export function RadicadosPage() {
   });
   const [saving, setSaving] = useState(false);
 
-  useEffect(() => { loadData(); }, []);
+  useEffect(() => { loadData(); }, [user?.dependency_id, user?.role]);
 
   // Load all dependencies with hierarchy info
   useEffect(() => {
@@ -71,10 +73,20 @@ export function RadicadosPage() {
   const loadData = async () => {
     setLoading(true);
     try {
+      let tmplQuery = supabase
+        .from('templates')
+        .select('id, name, code')
+        .order('name');
+
+      // Admin sees all templates; signer sees their dependency's or general templates
+      if (user?.role === 'SIGNER') {
+        tmplQuery = tmplQuery.or(`dependency_id.eq.${user.dependency_id || 'nil'},dependency_id.is.null`);
+      }
+
       const [radicadosRes, instRes, tmplRes] = await Promise.all([
         supabase.from('radicados').select('*, institution:institutions(name, code), dependency:dependencies(name, code), template:templates(name)').order('name'),
         supabase.from('institutions').select('id, name, code').order('name'),
-        supabase.from('templates').select('id, name, code').order('name'),
+        tmplQuery,
       ]);
       setRadicados(radicadosRes.data || []);
       setInstitutions(instRes.data || []);

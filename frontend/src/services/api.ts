@@ -198,6 +198,34 @@ export const templatesApi = {
     const { error } = await supabase.from('templates').delete().eq('id', id);
     if (error) throw error;
   },
+
+  duplicate: async (id: string) => {
+    // Load the original template
+    const { data: original, error: fetchError } = await supabase
+      .from('templates')
+      .select('*')
+      .eq('id', id)
+      .single();
+    if (fetchError) throw fetchError;
+
+    // Create a duplicate with a modified name and code
+    const { data: result, error } = await supabase
+      .from('templates')
+      .insert({
+        name: `${original.name} (copia)`,
+        code: `${original.code}-copy`,
+        category: original.category,
+        orientation: original.orientation,
+        config: original.config,
+        variables: original.variables,
+        institution_id: original.institution_id,
+        is_active: true,
+      })
+      .select()
+      .single();
+    if (error) throw error;
+    return result;
+  },
 };
 
 // --- Certificate Requests API ---
