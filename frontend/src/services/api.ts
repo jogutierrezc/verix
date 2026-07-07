@@ -502,6 +502,79 @@ export const authorizedSignaturesApi = {
   },
 };
 
+// --- User Certificates (P12/PFX) API ---
+export const userCertificatesApi = {
+  findByUser: async (userId: string) => {
+    const { data, error } = await supabase
+      .from('user_certificates')
+      .select('*')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (error) throw error;
+    return data || null;
+  },
+
+  findAllByInstitution: async (institutionId: string) => {
+    const { data, error } = await supabase
+      .from('user_certificates')
+      .select('*, user:users(first_name, last_name, email)')
+      .eq('institution_id', institutionId)
+      .order('created_at', { ascending: false });
+    if (error) throw error;
+    return data || [];
+  },
+
+  create: async (data: {
+    user_id: string;
+    institution_id: string;
+    storage_path: string;
+    original_filename: string;
+    thumbprint?: string;
+    issuer?: string;
+    subject?: string;
+    valid_from?: string;
+    valid_to?: string;
+    serial_number?: string;
+  }) => {
+    const { data: result, error } = await supabase.from('user_certificates').insert(data).select().single();
+    if (error) throw error;
+    return result;
+  },
+
+  update: async (id: string, data: any) => {
+    const { data: result, error } = await supabase
+      .from('user_certificates')
+      .update({ ...data, updated_at: new Date().toISOString() })
+      .eq('id', id)
+      .select()
+      .single();
+    if (error) throw error;
+    return result;
+  },
+
+  remove: async (id: string) => {
+    const { error } = await supabase.from('user_certificates').delete().eq('id', id);
+    if (error) throw error;
+  },
+
+  /** Sube el archivo .p12/.pfx a Storage y devuelve la ruta */
+  uploadFile: async (userId: string, file: File) => {
+    const path = `${STORAGE.PATHS.P12_CERTIFICATES(userId)}/${Date.now()}-${file.name}`;
+    const { error: uploadError } = await supabase.storage.from(STORAGE.BUCKET).upload(path, file);
+    if (uploadError) throw uploadError;
+    const { data: { publicUrl } } = supabase.storage.from(STORAGE.BUCKET).getPublicUrl(path);
+    return { path, publicUrl };
+  },
+
+  /** Elimina un archivo de Storage */
+  deleteFile: async (storagePath: string) => {
+    const { error } = await supabase.storage.from(STORAGE.BUCKET).remove([storagePath]);
+    if (error) throw error;
+  },
+};
+
 // --- Upload API (Supabase Storage) ---
 export const uploadApi = {
   upload: async (bucket: string, path: string, file: File) => {

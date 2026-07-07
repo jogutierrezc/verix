@@ -37,11 +37,20 @@ export const STORAGE = {
     DOCUMENTS: (id?: string) => id ? `documents/${id}` : 'documents',
     /** Certificados emitidos: certificates/{id}/{file} */
     CERTIFICATES: (id?: string) => id ? `certificates/${id}` : 'certificates',
+    /** Certificados P12/PFX por usuario: p12-certificates/{userId}/{file} */
+    P12_CERTIFICATES: (userId: string) => `p12-certificates/${userId}`,
   },
   /** Límite: 50MB */
   MAX_FILE_SIZE: 50 * 1024 * 1024,
   /** Tipos MIME permitidos */
-  ALLOWED_MIME_TYPES: ['image/png', 'image/jpeg', 'image/svg+xml', 'application/pdf'] as const,
+  ALLOWED_MIME_TYPES: [
+    'image/png',
+    'image/jpeg',
+    'image/svg+xml',
+    'application/pdf',
+    'application/x-pkcs12',
+    'application/pkcs12',
+  ] as const,
 } as const;
 
 export type Tables = {

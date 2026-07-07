@@ -238,6 +238,14 @@ export function RequestsPage() {
     }
   };
 
+  const getStudentName = (req: any) => {
+    return req.data?.nombre_estudiante || req.data?.nombre || `${req.user?.first_name || ''} ${req.user?.last_name || ''}`.trim() || '—';
+  };
+
+  const getStudentDocument = (req: any) => {
+    return req.data?.documento_estudiante || req.data?.document_id || req.data?.documento || req.user?.document_id || '—';
+  };
+
   const filtered = requests.filter(r =>
     !search ||
     r.code?.toLowerCase().includes(search.toLowerCase()) ||
@@ -271,14 +279,6 @@ export function RequestsPage() {
 
   const isRequestDownloadable = (req: any) => {
     return Boolean(req.certificate_url && ['APPROVED', 'SIGNED'].includes(req.status));
-  };
-
-  const getStudentName = (req: any) => {
-    return req.data?.nombre_estudiante || req.data?.nombre || `${req.user?.first_name || ''} ${req.user?.last_name || ''}`.trim() || '—';
-  };
-
-  const getStudentDocument = (req: any) => {
-    return req.data?.documento_estudiante || req.data?.document_id || req.data?.documento || req.user?.document_id || '—';
   };
 
   return (

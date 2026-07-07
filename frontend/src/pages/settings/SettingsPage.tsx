@@ -2,9 +2,10 @@ import { useState, useEffect } from 'react';
 import { useAuth } from '../../hooks/useAuth';
 import { supabase } from '../../lib/supabase';
 import { SignaturePad } from '../../components/signature/SignaturePad';
-import { authorizedSignaturesApi } from '../../services/api';
-import { User, Shield, Key, Save, Pen, ChevronRight, Info, Users, Plus, Trash2, Star, X, Upload } from 'lucide-react';
+import { authorizedSignaturesApi, userCertificatesApi } from '../../services/api';
+import { User, Shield, Key, Save, Pen, ChevronRight, Info, Users, Plus, Trash2, Star, X, Upload, FileKey, ShieldCheck, AlertTriangle, Clock, CheckCircle } from 'lucide-react';
 import toast from 'react-hot-toast';
+import forge from 'node-forge';
 
 export function SettingsPage() {
   const { user, refreshUser } = useAuth();
@@ -23,6 +24,15 @@ export function SettingsPage() {
     document_id: '',
   });
 
+  // P12 Certificate state
+  const [p12Certificate, setP12Certificate] = useState<any>(null);
+  const [p12Loading, setP12Loading] = useState(false);
+  const [selectedP12File, setSelectedP12File] = useState<File | null>(null);
+  const [p12Password, setP12Password] = useState('');
+  const [parsedCertInfo, setParsedCertInfo] = useState<any>(null);
+  const [p12Uploading, setP12Uploading] = useState(false);
+  const [showP12Upload, setShowP12Upload] = useState(false);
+
   useEffect(() => {
     if (user) {
       setProfile({
@@ -36,6 +46,9 @@ export function SettingsPage() {
   useEffect(() => {
     if (activeTab === 'signatories' && user?.id) {
       loadSignatories();
+    }
+    if (activeTab === 'signature' && user?.id) {
+      loadP12Certificate();
     }
   }, [activeTab, user?.id]);
 
@@ -124,6 +137,230 @@ export function SettingsPage() {
     } catch (err: any) {
       toast.error(err.message);
     }
+  };
+
+  // ── P12 Certificate ──
+
+  const loadP12Certificate = async () => {
+    if (!user?.id) return;
+    setP12Loading(true);
+    try {
+      const cert = await userCertificatesApi.findByUser(user.id);
+      setP12Certificate(cert);
+    } catch (err: any) {
+      console.error('Error loading P12 certificate:', err);
+    } finally {
+      setP12Loading(false);
+    }
+  };
+
+  /**
+   * Parses a P12/PFX file using node-forge and returns certificate metadata.
+   * Works entirely in the browser — compatible with Vercel static hosting.
+   */
+  const parseP12File = async (file: File, password: string) => {
+    const arrayBuffer = await file.arrayBuffer();
+    const bytes = new Uint8Array(arrayBuffer);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+
+    try {
+      const asn1 = forge.asn1.fromDer(forge.util.createBuffer(binary));
+      const p12 = forge.pkcs12.pkcs12FromAsn1(asn1, password);
+
+      const certBagOid = forge.pki.oids.certBag || '';
+      const keyBagOid = forge.pki.oids.pkcs8ShroudedKeyBag || '';
+      const rawCertBags = p12.getBags({ bagType: certBagOid });
+      const rawKeyBags = p12.getBags({ bagType: keyBagOid });
+
+      // Safely extract bag lists — node-forge types are imprecise here
+      const getBagList = (bags: any, oid: string) => {
+        if (!bags) return [];
+        const list = bags[oid];
+        return Array.isArray(list) ? list : [];
+      };
+
+      const certBagList = getBagList(rawCertBags, certBagOid);
+      if (certBagList.length === 0) {
+        throw new Error('No se encontró ningún certificado en el archivo P12');
+      }
+
+      const cert = certBagList[0].cert;
+      if (!cert) {
+        throw new Error('No se pudo extraer el certificado del archivo');
+      }
+
+      // Build subject & issuer as readable strings
+      const formatName = (attrs: any[]) =>
+        (attrs || []).map((a: any) => `${a.name || a.shortName || ''}=${a.value}`).join(', ');
+
+      // Calculate SHA-256 thumbprint
+      const derBytes = forge.asn1.toDer(forge.pki.certificateToAsn1(cert)).getBytes();
+      const md = forge.md.sha256.create();
+      md.update(derBytes);
+      const thumbprint = md.digest().toHex();
+
+      // Format thumbprint with colons
+      const thumbprintFormatted = thumbprint.match(/.{1,2}/g)?.join(':').toUpperCase() || thumbprint.toUpperCase();
+
+      const keyBagList = getBagList(rawKeyBags, keyBagOid);
+
+      const c = cert as any;
+      return {
+        subject: formatName(c.subject?.attributes),
+        issuer: formatName(c.issuer?.attributes),
+        serialNumber: cert.serialNumber,
+        validFrom: c.validity?.notBefore,
+        validTo: c.validity?.notAfter,
+        thumbprint: thumbprintFormatted,
+        hasPrivateKey: keyBagList.length > 0,
+      };
+    } catch (err: any) {
+      if (err.message?.includes('Invalid password') || err.message?.includes('PKCS12')) {
+        throw new Error('Contraseña incorrecta o archivo inválido');
+      }
+      throw err;
+    }
+  };
+
+  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    // Validate extension
+    const ext = file.name.split('.').pop()?.toLowerCase();
+    if (ext !== 'p12' && ext !== 'pfx') {
+      toast.error('Solo archivos .p12 o .pfx');
+      e.target.value = '';
+      return;
+    }
+
+    // Validate size (max 10MB)
+    if (file.size > 10 * 1024 * 1024) {
+      toast.error('El archivo es demasiado grande (máximo 10MB)');
+      e.target.value = '';
+      return;
+    }
+
+    setSelectedP12File(file);
+    setParsedCertInfo(null);
+  };
+
+  const handleParseCertificate = async () => {
+    if (!selectedP12File) {
+      toast.error('Selecciona un archivo .p12 o .pfx');
+      return;
+    }
+    if (!p12Password) {
+      toast.error('Ingresa la contraseña del certificado');
+      return;
+    }
+
+    const loadingToast = toast.loading('Analizando certificado...');
+    try {
+      const info = await parseP12File(selectedP12File, p12Password);
+      setParsedCertInfo(info);
+      toast.success('✅ Certificado analizado correctamente', { id: loadingToast });
+    } catch (err: any) {
+      toast.error(err.message || 'Error al analizar el certificado', { id: loadingToast });
+      setParsedCertInfo(null);
+    }
+  };
+
+  const handleUploadP12 = async () => {
+    if (!selectedP12File || !parsedCertInfo || !user?.id) return;
+
+    setP12Uploading(true);
+    const loadingToast = toast.loading('Subiendo certificado...');
+    try {
+      // 1. Upload file to Storage
+      const { path: storagePath } = await userCertificatesApi.uploadFile(user.id, selectedP12File);
+
+      // 2. If there was a previous certificate, remove it and delete the file
+      if (p12Certificate) {
+        try {
+          await userCertificatesApi.deleteFile(p12Certificate.storage_path);
+          await userCertificatesApi.remove(p12Certificate.id);
+        } catch { /* ignore cleanup errors */ }
+      }
+
+      // 3. Save metadata to DB
+      const record = await userCertificatesApi.create({
+        user_id: user.id,
+        institution_id: (user as any).institution_id || '',
+        storage_path: storagePath,
+        original_filename: selectedP12File.name,
+        thumbprint: parsedCertInfo.thumbprint,
+        issuer: parsedCertInfo.issuer,
+        subject: parsedCertInfo.subject,
+        valid_from: parsedCertInfo.validFrom instanceof Date
+          ? parsedCertInfo.validFrom.toISOString()
+          : parsedCertInfo.validFrom,
+        valid_to: parsedCertInfo.validTo instanceof Date
+          ? parsedCertInfo.validTo.toISOString()
+          : parsedCertInfo.validTo,
+        serial_number: parsedCertInfo.serialNumber,
+      });
+
+      // 4. Store encrypted password via Edge Function (Fase 2)
+      try {
+        const { error: fnError } = await supabase.functions.invoke('store-p12-password', {
+          body: { record_id: record.id, password: p12Password },
+        });
+
+        if (fnError) {
+          console.error('⚠️ Error al almacenar contraseña cifrada:', fnError);
+          toast.error('Certificado instalado, pero no se pudo cifrar la contraseña. La firma digital no funcionará hasta que reintentes.', { id: loadingToast });
+          setP12Certificate(record);
+          return;
+        }
+      } catch (fnErr) {
+        console.error('⚠️ Error llamando a store-p12-password:', fnErr);
+        toast.error('Certificado instalado, pero hubo un error al guardar la contraseña cifrada.', { id: loadingToast });
+        setP12Certificate(record);
+        return;
+      }
+
+      setP12Certificate(record);
+      setShowP12Upload(false);
+      setSelectedP12File(null);
+      setP12Password('');
+      setParsedCertInfo(null);
+      toast.success('✅ Certificado digital instalado correctamente — firma digital lista', { id: loadingToast });
+    } catch (err: any) {
+      toast.error(err.message || 'Error al subir el certificado', { id: loadingToast });
+    } finally {
+      setP12Uploading(false);
+    }
+  };
+
+  const handleRemoveP12 = async () => {
+    if (!p12Certificate || !confirm('¿Eliminar este certificado digital? Las solicitudes futuras no podrán firmarse digitalmente.')) return;
+
+    setP12Uploading(true);
+    try {
+      await userCertificatesApi.deleteFile(p12Certificate.storage_path);
+      await userCertificatesApi.remove(p12Certificate.id);
+      setP12Certificate(null);
+      toast.success('Certificado eliminado');
+    } catch (err: any) {
+      toast.error(err.message || 'Error al eliminar');
+    } finally {
+      setP12Uploading(false);
+    }
+  };
+
+  const isCertExpired = (cert: any) => {
+    if (!cert?.valid_to) return false;
+    return new Date(cert.valid_to) < new Date();
+  };
+
+  const isCertExpiringSoon = (cert: any) => {
+    if (!cert?.valid_to) return false;
+    const thirtyDays = 30 * 24 * 60 * 60 * 1000;
+    return new Date(cert.valid_to).getTime() - Date.now() < thirtyDays;
   };
 
   const handleSetPrimary = async (id: string) => {
@@ -303,44 +540,222 @@ export function SettingsPage() {
                   />
                 </div>
 
-                {/* Digital Certificate */}
+                {/* Digital Certificate — P12/PFX */}
                 <div className="space-y-4">
                   <h4 className="font-semibold text-on-surface">Firma Digital (e.Firma)</h4>
-                  <div className="bg-white/50 border border-outline-variant rounded-xl p-6 space-y-5">
-                    <div className="flex items-start gap-4">
-                      <div className="bg-primary/10 p-3 rounded-lg text-primary">
-                        <Key size={22} />
-                      </div>
-                      <div className="flex-1">
-                        <p className="font-semibold text-on-surface">Certificado P12 / PFX</p>
-                        <p className="text-sm text-on-surface-variant mt-1">Sube tu certificado criptográfico institucional para firmar certificados a prueba de manipulaciones.</p>
-                        <button className="mt-4 flex items-center gap-2 text-primary font-semibold text-sm hover:underline">
-                          + Importar Certificado
-                        </button>
+
+                  {p12Loading ? (
+                    <div className="bg-white/50 border border-outline-variant rounded-xl p-6 flex items-center justify-center">
+                      <div className="flex items-center gap-3">
+                        <div className="w-5 h-5 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+                        <span className="text-sm text-on-surface-variant">Cargando certificado...</span>
                       </div>
                     </div>
-                    <div className="h-px bg-surface-container-highest" />
-                    <div className="flex items-start gap-4">
-                      <div className="bg-secondary-fixed p-3 rounded-lg text-secondary">
-                        <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 15a4 4 0 004 4h9a5 5 0 10-.1-9.999 5.002 5.002 0 10-9.78 2.096A4.001 4.001 0 003 15z" /></svg>
+                  ) : p12Certificate && !showP12Upload ? (
+                    /* ── Certificate installed ── */
+                    <div className="bg-white/50 border border-outline-variant rounded-xl overflow-hidden">
+                      {/* Status header */}
+                      <div className={`px-5 py-3 flex items-center justify-between ${
+                        isCertExpired(p12Certificate)
+                          ? 'bg-error-container/30 border-b border-error/20'
+                          : isCertExpiringSoon(p12Certificate)
+                          ? 'bg-tertiary-fixed/30 border-b border-tertiary/20'
+                          : 'bg-primary/5 border-b border-primary/10'
+                      }`}>
+                        <div className="flex items-center gap-3">
+                          {isCertExpired(p12Certificate) ? (
+                            <AlertTriangle size={20} className="text-error" />
+                          ) : isCertExpiringSoon(p12Certificate) ? (
+                            <Clock size={20} className="text-tertiary" />
+                          ) : (
+                            <ShieldCheck size={20} className="text-primary" />
+                          )}
+                          <div>
+                            <p className="font-semibold text-sm text-on-surface">
+                              {isCertExpired(p12Certificate)
+                                ? 'Certificado vencido'
+                                : isCertExpiringSoon(p12Certificate)
+                                ? 'Certificado próximo a vencer'
+                                : 'Certificado activo'}
+                            </p>
+                            <p className="text-xs text-on-surface-variant">{p12Certificate.original_filename}</p>
+                          </div>
+                        </div>
+                        <span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold uppercase ${
+                          isCertExpired(p12Certificate)
+                            ? 'bg-error-container text-on-error-container'
+                            : 'bg-primary/10 text-primary'
+                        }`}>
+                          <span className={`w-1.5 h-1.5 rounded-full ${
+                            isCertExpired(p12Certificate) ? 'bg-error' : 'bg-primary'
+                          }`} />
+                          {isCertExpired(p12Certificate) ? 'Vencido' : 'Vigente'}
+                        </span>
                       </div>
-                      <div className="flex-1">
-                        <p className="font-semibold text-on-surface">Cloud Identity Link</p>
-                        <p className="text-sm text-on-surface-variant mt-1">Conecta tu cuenta DigiCert o GlobalSign para firma con token hardware.</p>
-                        <div className="mt-4 flex gap-4 items-center">
-                          <button className="btn-secondary btn-sm">Conectar</button>
-                          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-error-container text-on-error-container text-xs font-bold uppercase">
-                            <span className="w-1.5 h-1.5 rounded-full bg-error" /> Pendiente
-                          </span>
+
+                      {/* Certificate details */}
+                      <div className="p-5 space-y-3">
+                        <div className="grid grid-cols-1 gap-2">
+                          <DetailRow label="Titular" value={p12Certificate.subject} />
+                          <DetailRow label="Emitido por" value={p12Certificate.issuer} />
+                          <DetailRow
+                            label="Válido desde"
+                            value={p12Certificate.valid_from ? new Date(p12Certificate.valid_from).toLocaleDateString('es-CO') : '—'}
+                          />
+                          <DetailRow
+                            label="Válido hasta"
+                            value={p12Certificate.valid_to ? new Date(p12Certificate.valid_to).toLocaleDateString('es-CO') : '—'}
+                            valueClass={isCertExpired(p12Certificate) ? 'text-error font-semibold' : ''}
+                          />
+                          <DetailRow label="Huella SHA-256" value={p12Certificate.thumbprint} mono />
+                        </div>
+
+                        <div className="flex items-center gap-3 pt-3 border-t border-outline-variant/20">
+                          <button
+                            onClick={() => setShowP12Upload(true)}
+                            className="btn-secondary btn-sm"
+                          >
+                            <Upload size={14} /> Reemplazar
+                          </button>
+                          <button
+                            onClick={handleRemoveP12}
+                            disabled={p12Uploading}
+                            className="btn-ghost btn-sm text-error hover:bg-error/5"
+                          >
+                            <Trash2 size={14} /> Eliminar
+                          </button>
                         </div>
                       </div>
                     </div>
-                  </div>
-                  <div className="bg-primary/5 border border-primary/20 rounded-xl p-4 flex items-center gap-3">
-                    <Info size={20} className="text-primary shrink-0" />
-                    <p className="text-xs text-on-primary-fixed-variant">
-                      <strong className="font-bold">Nota:</strong> Tus claves privadas están encriptadas con AES-256 en un módulo de seguridad hardware (HSM). VERIX nunca tiene acceso a tu contraseña.
-                    </p>
+                  ) : (
+                    /* ── Upload / Replace form ── */
+                    <div className="bg-white/50 border border-outline-variant rounded-xl overflow-hidden">
+                      <div className="p-5 space-y-5">
+                        <div className="flex items-start gap-4">
+                          <div className="bg-primary/10 p-3 rounded-lg text-primary">
+                            <FileKey size={22} />
+                          </div>
+                          <div className="flex-1">
+                            <p className="font-semibold text-on-surface">Certificado P12 / PFX</p>
+                            <p className="text-sm text-on-surface-variant mt-1">
+                              Sube tu certificado criptográfico institucional para firmar certificados digitalmente.
+                            </p>
+                          </div>
+                        </div>
+
+                        {/* File picker */}
+                        <div>
+                          <label className="label">Archivo .p12 o .pfx</label>
+                          <label className="flex flex-col items-center justify-center border-2 border-dashed border-outline-variant rounded-xl p-6 cursor-pointer hover:border-primary/50 transition-all group bg-white/30">
+                            <Upload size={32} className="text-outline-variant group-hover:text-primary transition-colors mb-2" />
+                            <p className="text-sm font-medium text-on-surface">
+                              {selectedP12File ? selectedP12File.name : 'Selecciona un archivo .p12 o .pfx'}
+                            </p>
+                            <p className="text-xs text-on-surface-variant mt-1">
+                              {selectedP12File ? `${(selectedP12File.size / 1024).toFixed(1)} KB` : 'Máximo 10 MB'}
+                            </p>
+                            <input
+                              type="file"
+                              accept=".p12,.pfx"
+                              onChange={handleFileSelect}
+                              className="hidden"
+                            />
+                          </label>
+                        </div>
+
+                        {/* Password */}
+                        <div>
+                          <label className="label">Contraseña del certificado</label>
+                          <div className="relative">
+                            <input
+                              type="password"
+                              className="input w-full pr-10"
+                              value={p12Password}
+                              onChange={e => setP12Password(e.target.value)}
+                              placeholder="Contraseña del archivo .p12/.pfx"
+                            />
+                            <Key size={16} className="absolute right-3.5 top-1/2 -translate-y-1/2 text-on-surface-variant/50" />
+                          </div>
+                        </div>
+
+                        {/* Parse button */}
+                        {selectedP12File && p12Password && !parsedCertInfo && (
+                          <button
+                            onClick={handleParseCertificate}
+                            className="btn-primary w-full"
+                          >
+                            <ShieldCheck size={16} /> Analizar certificado
+                          </button>
+                        )}
+
+                        {/* Parsed certificate info */}
+                        {parsedCertInfo && (
+                          <div className="bg-primary/5 border border-primary/20 rounded-xl p-4 space-y-2">
+                            <div className="flex items-center gap-2 mb-2">
+                              <CheckCircle size={16} className="text-primary" />
+                              <span className="text-sm font-bold text-primary">Certificado válido</span>
+                            </div>
+                            <DetailRow label="Titular" value={parsedCertInfo.subject} />
+                            <DetailRow label="Emitido por" value={parsedCertInfo.issuer} />
+                            <DetailRow
+                              label="Válido desde"
+                              value={parsedCertInfo.validFrom instanceof Date
+                                ? parsedCertInfo.validFrom.toLocaleDateString('es-CO')
+                                : new Date(parsedCertInfo.validFrom).toLocaleDateString('es-CO')}
+                            />
+                            <DetailRow
+                              label="Válido hasta"
+                              value={parsedCertInfo.validTo instanceof Date
+                                ? parsedCertInfo.validTo.toLocaleDateString('es-CO')
+                                : new Date(parsedCertInfo.validTo).toLocaleDateString('es-CO')}
+                              valueClass={new Date(parsedCertInfo.validTo) < new Date() ? 'text-error font-semibold' : ''}
+                            />
+                            <DetailRow label="Huella SHA-256" value={parsedCertInfo.thumbprint} mono />
+                            <DetailRow
+                              label="Clave privada"
+                              value={parsedCertInfo.hasPrivateKey ? '✓ Incluida' : '✗ No encontrada'}
+                              valueClass={parsedCertInfo.hasPrivateKey ? 'text-primary' : 'text-error'}
+                            />
+
+                            {!parsedCertInfo.hasPrivateKey && (
+                              <div className="flex items-center gap-2 mt-2 p-2 bg-error/10 rounded-lg">
+                                <AlertTriangle size={14} className="text-error shrink-0" />
+                                <p className="text-xs text-error">El archivo no contiene la clave privada. No se podrá usar para firmar.</p>
+                              </div>
+                            )}
+
+                            <div className="flex gap-3 pt-3">
+                              <button
+                                onClick={handleUploadP12}
+                                disabled={p12Uploading || !parsedCertInfo.hasPrivateKey}
+                                className="btn-primary flex-1"
+                              >
+                                {p12Uploading ? 'Instalando...' : 'Instalar certificado'}
+                              </button>
+                              <button
+                                onClick={() => { setShowP12Upload(false); setSelectedP12File(null); setP12Password(''); setParsedCertInfo(null); }}
+                                className="btn-secondary"
+                                disabled={p12Uploading}
+                              >
+                                Cancelar
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="bg-primary/5 border border-primary/20 rounded-xl p-4 flex items-start gap-3">
+                    <Info size={20} className="text-primary shrink-0 mt-0.5" />
+                    <div>
+                      <p className="text-xs font-bold text-primary uppercase mb-0.5">¿Cómo funciona?</p>
+                      <p className="text-xs text-on-surface-variant">
+                        El certificado se almacena en la nube y la contraseña se cifra con <strong className="font-semibold">AES-256-GCM</strong>.
+                        Al aprobar una solicitud, el sistema firma automáticamente el PDF. La contraseña
+                        solo se descifra dentro del servidor seguro, nunca en el navegador.
+                      </p>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -568,6 +983,29 @@ export function SettingsPage() {
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+// ── Helper components ──
+
+interface DetailRowProps {
+  label: string;
+  value: string;
+  mono?: boolean;
+  valueClass?: string;
+}
+
+function DetailRow({ label, value, mono, valueClass }: DetailRowProps) {
+  return (
+    <div className="flex items-start gap-2">
+      <span className="text-xs text-on-surface-variant/70 shrink-0 min-w-[100px] pt-0.5">{label}</span>
+      <span
+        className={`text-xs text-on-surface break-all ${mono ? 'font-mono text-[11px]' : ''} ${valueClass || ''}`}
+        title={value}
+      >
+        {value || '—'}
+      </span>
     </div>
   );
 }
