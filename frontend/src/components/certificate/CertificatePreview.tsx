@@ -213,8 +213,20 @@ export function CertificatePreview({
     try {
       toast.loading('Generando PDF...', { id: 'pdf-gen' });
 
+      // Calculate optimal scale for 300 DPI at the target page size
+      // The preview element is rendered at previewScale (0.55) of its real size
+      // We need: elementWidth * scale >= pageWidth * (300 / 72)
+      const elementWidth = certificateRef.current.clientWidth;
+      const targetDPI = 300;
+      const pointsPerInch = 72;
+      const physicalWidthInches = pageWidth / pointsPerInch;
+      const targetPixels = Math.round(physicalWidthInches * targetDPI);
+      const optimalScale = Math.ceil(targetPixels / elementWidth);
+      // Cap at a reasonable max to avoid browser crashes on large captures
+      const captureScale = Math.min(optimalScale, 8);
+
       const canvas = await html2canvas(certificateRef.current, {
-        scale: 4, // Ultra-high resolution for print
+        scale: captureScale,
         useCORS: true,
         backgroundColor: '#ffffff',
         logging: false,
@@ -241,8 +253,15 @@ export function CertificatePreview({
   const generatePdfBase64 = async (): Promise<string | null> => {
     if (!certificateRef.current) return null;
     try {
+      // Calculate optimal scale for ~200 DPI (lower than download to fit Edge Function payload ~6MB)
+      const elementWidth = certificateRef.current.clientWidth;
+      const physicalWidthInches = pageWidth / 72;
+      const targetPixels = Math.round(physicalWidthInches * 200);
+      const optimalScale = Math.ceil(targetPixels / elementWidth);
+      const captureScale = Math.min(optimalScale, 6);
+
       const canvas = await html2canvas(certificateRef.current, {
-        scale: 3, // High resolution for digital signing (PNG + scale 3 to fit Edge Function payload limit)
+        scale: captureScale,
         useCORS: true,
         backgroundColor: '#ffffff',
         logging: false,
@@ -480,13 +499,17 @@ export function CertificatePreview({
       if (el.type === 'qr') {
         // QR siempre contiene la URL de validación, sin importar el content del template
         const qrValue = validationUrl;
-        const qrSize = Math.min(el.width * scale * 0.75, el.height * scale * 0.75);
+        // Render QR at high native resolution for crisp PDF output
+        // The preview is at scale 0.55, but the PDF capture can be up to 8x
+        // Using multiplier 3 + minimum 200px ensures enough pixels for the QR modules
+        const qrPreviewSize = Math.min(el.width * scale * 0.75, el.height * scale * 0.75);
+        const qrCanvasSize = Math.max(Math.round(qrPreviewSize * 4), 200);
         return (
           <div className="w-full h-full flex items-center justify-center bg-white rounded relative">
-            <div className="flex items-center justify-center" style={{ width: qrSize, height: qrSize }}>
+            <div className="flex items-center justify-center" style={{ width: qrPreviewSize, height: qrPreviewSize }}>
               <QRCodeCanvas
                 value={qrValue}
-                size={qrSize}
+                size={qrCanvasSize}
                 bgColor="#ffffff"
                 fgColor="#006e2f"
                 level="M"
