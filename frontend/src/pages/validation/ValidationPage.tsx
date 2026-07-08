@@ -923,10 +923,25 @@ export function ValidationPage() {
 
       {/* Footer */}
       <footer className="border-t border-slate-200 bg-white py-8 mt-12 relative z-10 text-center">
-        <div className="max-w-7xl mx-auto px-4 space-y-2">
+        <div className="max-w-7xl mx-auto px-4 space-y-3">
           <p className="text-xs font-semibold text-slate-400">
             Este portal de validación está protegido mediante cifrado SSL de extremo a extremo.
           </p>
+          <div>
+            <button
+              onClick={() => { if (typeof window !== 'undefined') window.location.href = '/validate'; }}
+              className="inline-flex items-center gap-1 text-xs text-slate-400 hover:text-emerald-700 transition-colors font-medium bg-transparent border-none cursor-pointer"
+            >
+              ← Volver al buscador de certificados
+            </button>
+            <span className="text-slate-300 mx-2">·</span>
+            <button
+              onClick={() => { if (typeof window !== 'undefined') window.location.href = '/login'; }}
+              className="inline-flex items-center gap-1 text-xs text-slate-400 hover:text-emerald-700 transition-colors font-medium bg-transparent border-none cursor-pointer"
+            >
+              Volver al inicio de sesión
+            </button>
+          </div>
           <p className="text-[11px] text-slate-400">
             Powered by <span className="font-black tracking-tight text-slate-700">VERIX un desarrollo de Jose Alfredo Gutierrez Contreras</span> · © {new Date().getFullYear()} Todos los derechos reservados.
           </p>

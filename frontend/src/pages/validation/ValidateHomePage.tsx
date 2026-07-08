@@ -96,8 +96,18 @@ export function ValidateHomePage() {
           </p>
         </div>
 
+        {/* Back to login */}
+        <div className="text-center mt-6">
+          <button
+            onClick={() => navigate('/login')}
+            className="text-xs text-gray-400 hover:text-green-700 transition-colors font-medium"
+          >
+            ← Volver al inicio de sesión
+          </button>
+        </div>
+
         {/* Powered by */}
-        <div className="text-center mt-8">
+        <div className="text-center mt-4">
           <p className="text-xs text-gray-400">
             Powered by <span className="font-semibold text-green-700">VERIX</span> · Sistema de Certificación Digital
           </p>
