@@ -321,6 +321,7 @@ export function TemplateEditorPage() {
   const [selectedElementId, setSelectedElementId] = useState<string | null>(null);
   const [customVariables, setCustomVariables] = useState<{ key: string; label: string }[]>([]);
   const [newCustomVarName, setNewCustomVarName] = useState('');
+  const [margins, setMargins] = useState({ top: 40, bottom: 40, left: 40, right: 40 });
 
   const selectedElement = elements.find((el) => el.id === selectedElementId) || null;
 
@@ -359,6 +360,9 @@ export function TemplateEditorPage() {
         const config = data.config as any;
         setElements(config?.elements || []);
         setLogoUrl(config?.logoUrl || '');
+        if (config?.margins) {
+          setMargins(config.margins);
+        }
 
         // Load custom variables from template (those not in the predefined list)
         const savedVars = Array.isArray(data.variables) ? data.variables : [];
@@ -488,6 +492,7 @@ export function TemplateEditorPage() {
         config: {
           elements,
           logoUrl,
+          margins,
           pageSize: 'A4',
           orientation,
         },
@@ -569,6 +574,7 @@ export function TemplateEditorPage() {
             onImageUpload={handleImageUpload}
             onSelectElement={(el) => setSelectedElementId(el?.id || null)}
             selectedElementId={selectedElementId}
+            margins={margins}
           />
         </div>
 
@@ -632,6 +638,65 @@ export function TemplateEditorPage() {
                     <option key={d.id} value={d.id}>{d.name} {d.code ? `(${d.code})` : ''}</option>
                   ))}
                 </select>
+              </div>
+
+              <hr className="border-outline-variant/30" />
+
+              {/* Margins Configuration */}
+              <div>
+                <h4 className="text-label-sm font-bold text-on-surface-variant uppercase tracking-wider mb-3 flex items-center gap-2">
+                  <Move size={16} />
+                  Márgenes
+                </h4>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <span className="text-[10px] text-on-surface-variant/60 block mb-0.5">Superior</span>
+                    <input
+                      type="number"
+                      min={0}
+                      max={200}
+                      className="input text-xs py-1.5"
+                      value={margins.top}
+                      onChange={e => setMargins({ ...margins, top: parseInt(e.target.value) || 0 })}
+                    />
+                  </div>
+                  <div>
+                    <span className="text-[10px] text-on-surface-variant/60 block mb-0.5">Inferior</span>
+                    <input
+                      type="number"
+                      min={0}
+                      max={200}
+                      className="input text-xs py-1.5"
+                      value={margins.bottom}
+                      onChange={e => setMargins({ ...margins, bottom: parseInt(e.target.value) || 0 })}
+                    />
+                  </div>
+                  <div>
+                    <span className="text-[10px] text-on-surface-variant/60 block mb-0.5">Izquierdo</span>
+                    <input
+                      type="number"
+                      min={0}
+                      max={200}
+                      className="input text-xs py-1.5"
+                      value={margins.left}
+                      onChange={e => setMargins({ ...margins, left: parseInt(e.target.value) || 0 })}
+                    />
+                  </div>
+                  <div>
+                    <span className="text-[10px] text-on-surface-variant/60 block mb-0.5">Derecho</span>
+                    <input
+                      type="number"
+                      min={0}
+                      max={200}
+                      className="input text-xs py-1.5"
+                      value={margins.right}
+                      onChange={e => setMargins({ ...margins, right: parseInt(e.target.value) || 0 })}
+                    />
+                  </div>
+                </div>
+                <p className="text-[10px] text-on-surface-variant/40 mt-1 leading-tight">
+                  Las guías visuales en el canvas muestran el área segura del documento.
+                </p>
               </div>
 
               <hr className="border-outline-variant/30" />

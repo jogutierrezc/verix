@@ -54,13 +54,10 @@ export function LoginPage() {
       <div className="relative z-10 w-full flex flex-col items-center mb-8 md:mb-12">
         <div className="relative mb-4">
           <div className="absolute -inset-4 bg-primary/20 blur-3xl rounded-full" />
-          <div className="relative bg-white p-5 rounded-2xl shadow-sm border border-white/50">
-            <div className="w-10 h-10 bg-primary rounded-xl flex items-center justify-center shadow-md">
-              <span className="text-on-primary font-bold text-xl">V</span>
-            </div>
+          <div className="relative bg-white p-5 rounded-2xl shadow-sm border border-white/50 flex items-center justify-center">
+            <img src="/Logo%20Verix.png" alt="VERIX" className="h-12 w-auto" />
           </div>
         </div>
-        <h1 className="text-headline-lg-mobile md:text-headline-lg font-headline-lg text-primary tracking-tighter">VERIX</h1>
         <p className="text-body-md font-body-md text-on-surface-variant mt-2 text-center opacity-80">
           Plataforma Institucional de Certificados
         </p>

@@ -345,6 +345,24 @@ export const requestsApi = {
   },
 };
 
+/**
+ * Obtiene la IP pública del cliente usando ipify.org
+ * Fallback a '0.0.0.0' si hay error o timeout (3s)
+ */
+export async function getClientIP(): Promise<string> {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 3000);
+    const response = await fetch('https://api.ipify.org?format=json', { signal: controller.signal });
+    clearTimeout(timeout);
+    if (!response.ok) return '0.0.0.0';
+    const data = await response.json();
+    return data.ip || '0.0.0.0';
+  } catch {
+    return '0.0.0.0';
+  }
+}
+
 // --- Audit API ---
 export const auditApi = {
   findAll: async (params?: {
@@ -378,6 +396,7 @@ export const auditApi = {
     action: string;
     entity_id?: string;
     entity_type?: string;
+    ip_address?: string;
     old_values?: any;
     new_values?: any;
     description?: string;
@@ -450,6 +469,7 @@ export const authorizedSignaturesApi = {
     document_id?: string;
     signature_image_url?: string;
     is_primary?: boolean;
+    is_active?: boolean;
   }) => {
     const { data: result, error } = await supabase.from('authorized_signatures').insert(data).select().single();
     if (error) throw error;

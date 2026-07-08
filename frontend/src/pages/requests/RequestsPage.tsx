@@ -1,11 +1,16 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useAuth } from '../../hooks/useAuth';
 import { Link } from 'react-router-dom';
 import { supabase } from '../../lib/supabase';
-import { Plus, Search, MoreHorizontal, CheckCircle, XCircle, X, Eye, Download } from 'lucide-react';
+import { auditApi, getClientIP } from '../../services/api';
+import { Plus, Search, MoreHorizontal, CheckCircle, XCircle, X, Eye, Download, ChevronDown, ChevronRight, Package, FileText, Loader2 } from 'lucide-react';
 import { format } from 'date-fns';
 import toast from 'react-hot-toast';
-import { CertificatePreview } from '../../components/certificate/CertificatePreview';
+import JSZip from 'jszip';
+import { saveAs } from 'file-saver';
+import { CertificatePreview, renderTemplateToPdf, fillTemplate, convertDatesInData, safeJsonParse } from '../../components/certificate/CertificatePreview';
+import type { TemplateElement } from '../../components/editor/TemplateCanvas';
+import { SkeletonCard } from '../../components/ui/SkeletonCard';
 
 const statusConfig: Record<string, { label: string; color: string; bg: string; borderColor: string }> = {
   DRAFT: { label: 'Borrador', color: 'text-on-surface-variant', bg: 'bg-surface-variant', borderColor: 'border-surface-variant' },
@@ -21,7 +26,6 @@ export function RequestsPage() {
   const { user } = useAuth();
   const [requests, setRequests] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
-  const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('');
   const [selected, setSelected] = useState<string | null>(null);
   const [rejectReason, setRejectReason] = useState('');
@@ -36,22 +40,60 @@ export function RequestsPage() {
   const [batchSignatures, setBatchSignatures] = useState<any[]>([]);
   const [downloading, setDownloading] = useState(false);
   const [downloadProgress, setDownloadProgress] = useState({ current: 0, total: 0 });
+  const [expandedBatches, setExpandedBatches] = useState<Set<string>>(new Set());
 
-  useEffect(() => { loadRequests(); }, [user, statusFilter]);
+  // ── Pagination ──
+  const [page, setPage] = useState(1);
+  const [totalCount, setTotalCount] = useState(0);
+  const pageSize = 20;
+  const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
+
+  // ── Debounced search ──
+  const [searchInput, setSearchInput] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
+  const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
+    searchTimerRef.current = setTimeout(() => {
+      setDebouncedSearch(searchInput);
+      setPage(1);
+    }, 400);
+    return () => { if (searchTimerRef.current) clearTimeout(searchTimerRef.current); };
+  }, [searchInput]);
+
+  useEffect(() => { loadRequests(); }, [user, statusFilter, page, debouncedSearch]);
 
   const loadRequests = async () => {
     setLoading(true);
     try {
+      // Build the base query
       let query = supabase
         .from('certificate_requests')
-        .select('*, user:users!certificate_requests_user_id_fkey(first_name, last_name, email), template:templates(name)')
-        .order('created_at', { ascending: false });
+        .select('*, user:users!certificate_requests_user_id_fkey(first_name, last_name, email), template:templates(name)', { count: 'exact' });
 
+      // Role-based filters
       if (user?.role === 'APPLICANT') query = query.eq('user_id', user.id);
       if (user?.role === 'SIGNER') query = query.in('status', ['PENDING', 'IN_REVIEW', 'APPROVED']);
+
+      // Status filter
       if (statusFilter) query = query.eq('status', statusFilter);
 
-      const { data, error } = await query;
+      // Server-side search via .or()
+      if (debouncedSearch) {
+        const searchTerm = debouncedSearch.trim();
+        query = query.or(
+          `code.ilike.%${searchTerm}%,user.first_name.ilike.%${searchTerm}%,user.last_name.ilike.%${searchTerm}%,template.name.ilike.%${searchTerm}%`
+        );
+      }
+
+      // Pagination
+      const from = (page - 1) * pageSize;
+      const to = from + pageSize - 1;
+
+      const { data, error, count } = await query
+        .order('created_at', { ascending: false })
+        .range(from, to);
 
       if (error) {
         console.error('❌ Error al cargar solicitudes:', error);
@@ -60,8 +102,9 @@ export function RequestsPage() {
         return;
       }
 
-      console.log('📋 Solicitudes cargadas:', data?.length || 0);
+      console.log('📋 Solicitudes cargadas:', data?.length || 0, 'Total:', count || 0);
       setRequests(data || []);
+      if (count !== null) setTotalCount(count);
     } catch (err) {
       console.error('❌ Error al cargar solicitudes:', err);
       toast.error('Error al cargar las solicitudes');
@@ -158,6 +201,25 @@ export function RequestsPage() {
       const { error } = await query.in('status', ['PENDING', 'IN_REVIEW']);
 
       if (error) throw error;
+
+      // ── Audit log: firma de lote ──
+      try {
+        const ip = await getClientIP();
+        const auditSigName = batchSelectedSignatureId
+          ? batchSignatures.find((s: any) => s.id === batchSelectedSignatureId)?.full_name || 'Desconocido'
+          : 'Sin firma';
+        await auditApi.log({
+          user_id: user?.id,
+          user_email: user?.email,
+          module: 'signatures',
+          action: 'batch_sign',
+          entity_id: signingBatchId || signingRequestIds.join(','),
+          entity_type: 'certificate_request_batch',
+          ip_address: ip,
+          description: `Firma masiva de ${signingRequestIds.length} solicitudes - Firma: ${auditSigName}`,
+        });
+      } catch { /* silent */ }
+
       toast.success('Lote firmado exitosamente');
       setShowBatchModal(false);
       setSigningBatchId(null);
@@ -246,18 +308,37 @@ export function RequestsPage() {
     return req.data?.documento_estudiante || req.data?.document_id || req.data?.documento || req.user?.document_id || '—';
   };
 
-  const filtered = requests.filter(r =>
-    !search ||
-    r.code?.toLowerCase().includes(search.toLowerCase()) ||
-    `${r.user?.first_name || ''} ${r.user?.last_name || ''}`.toLowerCase().includes(search.toLowerCase()) ||
-    getStudentName(r).toLowerCase().includes(search.toLowerCase()) ||
-    getStudentDocument(r).toLowerCase().includes(search.toLowerCase()) ||
-    r.template?.name?.toLowerCase().includes(search.toLowerCase())
-  );
+  // Search is now server-side via debouncedSearch → no client-side filtering needed
+  const filtered = requests;
 
   const eligibleDownloadRequests = requests.filter(req =>
     req.certificate_url && ['APPROVED', 'SIGNED'].includes(req.status),
   );
+
+  // Inline pagination with fewer buttons on mobile
+  const getPageNumbers = () => {
+    const pages: (number | 'ellipsis')[] = [];
+    if (totalPages <= 7) {
+      for (let i = 1; i <= totalPages; i++) pages.push(i);
+    } else if (page <= 4) {
+      for (let i = 1; i <= 5; i++) pages.push(i);
+      pages.push('ellipsis');
+      pages.push(totalPages);
+    } else if (page >= totalPages - 3) {
+      pages.push(1);
+      pages.push('ellipsis');
+      for (let i = totalPages - 4; i <= totalPages; i++) pages.push(i);
+    } else {
+      pages.push(1);
+      pages.push('ellipsis');
+      pages.push(page - 1);
+      pages.push(page);
+      pages.push(page + 1);
+      pages.push('ellipsis');
+      pages.push(totalPages);
+    }
+    return pages;
+  };
 
   const selectedDownloadableCount = selectedRequestIds.length > 0
     ? requests.filter(req => selectedRequestIds.includes(req.id) && req.certificate_url && ['APPROVED', 'SIGNED'].includes(req.status)).length
@@ -281,28 +362,192 @@ export function RequestsPage() {
     return Boolean(req.certificate_url && ['APPROVED', 'SIGNED'].includes(req.status));
   };
 
-  return (
-    <div className="max-w-screen-2xl mx-auto px-4 md:px-6 xl:px-8 space-y-6 animate-fade-in min-h-screen">
+  // ── Batch grouping ──
+  const groupBatches = useCallback((items: any[]) => {
+    const individualReqs: any[] = [];
+    const batchMap = new Map<string, any[]>();
+
+    for (const req of items) {
+      if (req.batch_id) {
+        const existing = batchMap.get(req.batch_id) || [];
+        existing.push(req);
+        batchMap.set(req.batch_id, existing);
+      } else {
+        individualReqs.push(req);
+      }
+    }
+
+    return { individualReqs, batchMap };
+  }, []);
+
+  const toggleBatchExpand = (batchId: string) => {
+    setExpandedBatches(prev => {
+      const next = new Set(prev);
+      if (next.has(batchId)) {
+        next.delete(batchId);
+      } else {
+        next.add(batchId);
+      }
+      return next;
+    });
+  };
+
+  // ── Download batch as ZIP — generates PDFs on-the-fly for ALL requests ──
+  const downloadBatchAsZip = async (batchId: string, batchReqs: any[]) => {
+    if (batchReqs.length === 0) {
+      toast.error('No hay solicitudes en este lote');
+      return;
+    }
+
+    setDownloading(true);
+    setDownloadProgress({ current: 0, total: batchReqs.length });
+
+    try {
+      const zip = new JSZip();
+      const folder = zip.folder(`lote-${batchId.substring(0, 8).toLowerCase()}`);
+      if (!folder) {
+        toast.error('Error al crear el archivo ZIP');
+        return;
+      }
+
+      // Pre-fetch unique template configs to avoid N+1 queries
+      const templateIds = [...new Set(batchReqs.map(r => r.template_id).filter(Boolean))];
+      let templateCache: Map<string, any> = new Map();
+
+      if (templateIds.length > 0) {
+        const { data: templates } = await supabase
+          .from('templates')
+          .select('id, config')
+          .in('id', templateIds);
+
+        if (templates) {
+          for (const t of templates) {
+            const rawConfig = t.config?.elements
+              ? t.config
+              : t.config?.config
+                ? (typeof t.config.config === 'string' ? safeJsonParse(t.config.config) : t.config.config)
+                : typeof t.config === 'string' ? safeJsonParse(t.config) : (t.config || {});
+            templateCache.set(t.id, rawConfig);
+          }
+        }
+      }
+
+      let successCount = 0;
+
+      for (let i = 0; i < batchReqs.length; i++) {
+        const req = batchReqs[i];
+        const fileName = `${req.code || 'certificado'}-${String(i + 1).padStart(3, '0')}.pdf`;
+
+        try {
+          // Case 1: existing certificate URL — download the pre-generated PDF
+          if (req.certificate_url) {
+            const response = await fetch(req.certificate_url);
+            if (response.ok) {
+              const blob = await response.blob();
+              folder.file(fileName, blob);
+              successCount++;
+              setDownloadProgress({ current: i + 1, total: batchReqs.length });
+              continue;
+            }
+            console.warn(`⚠️ Error descargando PDF existente para ${req.code}, generando uno nuevo...`);
+          }
+
+          // Case 2: no existing URL or download failed — generate PDF on-the-fly
+          const templateConfig = templateCache.get(req.template_id);
+          if (!templateConfig) {
+            console.warn(`⚠️ No se encontró plantilla para ${req.code}, saltando...`);
+            setDownloadProgress({ current: i + 1, total: batchReqs.length });
+            continue;
+          }
+
+          const elements: TemplateElement[] = templateConfig.elements || [];
+          const pageOrientation = templateConfig.orientation || 'landscape';
+          const pageWidth = pageOrientation === 'landscape' ? 842 : 595;
+          const pageHeight = pageOrientation === 'landscape' ? 595 : 842;
+
+          const rawData = req.data || {};
+          const reqCode = req.code || '';
+          const verificationCode = req.verification_code || reqCode;
+          const validationUrl = `${window.location.origin}/validate/${verificationCode}`;
+
+          const requestData = {
+            ...convertDatesInData(rawData),
+            codigo: verificationCode,
+            codigo_certificado: verificationCode,
+            codigo_solicitud: reqCode,
+            id_solicitud: reqCode,
+            codigo_verificacion: verificationCode,
+            qr_content: validationUrl,
+            ...(req.batch_id ? {
+              lote_id: req.batch_id,
+              lote_total: String(req.batch_total || ''),
+              lote_indice: String((req.row_index ?? -1) + 1),
+            } : {}),
+          };
+
+          const pdf = await renderTemplateToPdf(
+            elements,
+            pageOrientation,
+            pageWidth,
+            pageHeight,
+            requestData,
+            null, // no signature for pending certificates
+          );
+
+          const pdfBlob = pdf.output('blob');
+          folder.file(fileName, pdfBlob);
+          successCount++;
+        } catch (err) {
+          console.warn(`⚠️ Error generando PDF para ${req.code}:`, err);
+        }
+
+        setDownloadProgress({ current: i + 1, total: batchReqs.length });
+      }
+
+      if (successCount === 0) {
+        toast.error('No se pudo generar ningún PDF del lote');
+        setDownloading(false);
+        return;
+      }
+
+      const zipBlob = await zip.generateAsync({ type: 'blob' });
+      const batchCode = batchReqs[0]?.code?.substring(0, 10) || batchId.substring(0, 8);
+      saveAs(zipBlob, `certificados-lote-${batchCode}.zip`);
+
+      const skipped = batchReqs.length - successCount;
+      const msg = skipped > 0
+        ? `✅ Lote descargado (${successCount} certificados, ${skipped} omitidos)`
+        : `✅ Lote descargado (${successCount} certificados)`;
+      toast.success(msg);
+    } catch (err: any) {
+      console.error('❌ Error al generar ZIP:', err);
+      toast.error('Error al descargar el lote');
+    } finally {
+      setDownloading(false);
+    }
+  };
+
+  return (      <div className="max-w-screen-2xl mx-auto px-4 md:px-6 xl:px-8 space-y-6 animate-fade-in min-h-screen pb-24 md:pb-12">
       {/* Header */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div className="flex items-center gap-3">
-          <div className="w-10 h-10 bg-primary/10 rounded-2xl flex items-center justify-center">
+          <div className="w-10 h-10 bg-primary/10 rounded-2xl flex items-center justify-center shrink-0">
             <svg className="w-5 h-5 text-primary" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
           </div>
-          <div>
-            <h1 className="text-headline-lg font-headline-lg text-on-surface">Solicitudes</h1>
-            <p className="text-body-md text-on-surface-variant">
+          <div className="min-w-0">
+            <h1 className="text-headline-lg-mobile md:text-headline-lg font-headline-lg text-on-surface">Solicitudes</h1>
+            <p className="text-body-sm md:text-body-md text-on-surface-variant truncate">
               {user?.role === 'APPLICANT' ? 'Mis solicitudes de certificados' : 'Gestiona las solicitudes de emisión'}
             </p>
           </div>
         </div>
-        <div className="flex items-center gap-2">
-          <div className="relative">
-            <Search size={16} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-on-surface-variant/50" />
-            <input type="text" placeholder="Buscar..." className="input pl-10 w-40 md:w-48"
-              value={search} onChange={e => setSearch(e.target.value)} />
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="relative flex-1 min-w-[120px] max-w-[200px]">
+            <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-on-surface-variant/50" />
+            <input type="text" placeholder="Buscar..." className="input pl-9 pr-2 w-full text-sm h-10"
+              value={searchInput} onChange={e => setSearchInput(e.target.value)} />
           </div>
-          <select className="input w-32" value={statusFilter} onChange={e => setStatusFilter(e.target.value)}>
+          <select className="input w-auto min-w-[100px] text-sm h-10" value={statusFilter} onChange={e => setStatusFilter(e.target.value)}>
             <option value="">Todos</option>
             {Object.entries(statusConfig).map(([k, v]) => (
               <option key={k} value={k}>{v.label}</option>
@@ -311,9 +556,9 @@ export function RequestsPage() {
           {(user?.role === 'SIGNER' || user?.role === 'ADMIN') && selectedRequestIds.length > 0 && (
             <button
               onClick={() => openSelectedRequestsModal(selectedRequestIds)}
-              className="btn-secondary btn-sm"
+              className="btn-secondary btn-sm text-xs h-10"
             >
-              Firmar seleccionadas ({selectedRequestIds.length})
+              Firmar ({selectedRequestIds.length})
             </button>
           )}
           {user?.role === 'APPLICANT' && (
@@ -321,13 +566,13 @@ export function RequestsPage() {
               <button
                 onClick={downloadSelectedCertificates}
                 disabled={downloading || (selectedRequestIds.length === 0 ? eligibleDownloadRequests.length === 0 : selectedDownloadableCount === 0)}
-                className="btn-secondary btn-sm"
+                className="btn-secondary btn-sm text-xs h-10"
               >
                 {downloading
                   ? `Descargando (${downloadProgress.current}/${downloadProgress.total})`
-                  : `Descargar masivo (${selectedRequestIds.length > 0 ? selectedDownloadableCount : eligibleDownloadRequests.length})`}
+                  : `Descargar (${selectedRequestIds.length > 0 ? selectedDownloadableCount : eligibleDownloadRequests.length})`}
               </button>
-              <Link to="/requests/new" className="btn-primary btn-sm">
+              <Link to="/requests/new" className="btn-primary btn-sm h-10">
                 <Plus size={16} /> Nueva
               </Link>
             </>
@@ -335,124 +580,315 @@ export function RequestsPage() {
         </div>
       </div>
 
-      {/* Request list */}
+      {/* Request list with batch grouping */}
       <div className="space-y-3">
         {loading ? (
-          [...Array(4)].map((_, i) => (
-            <div key={i} className="glass-card p-5 rounded-2xl animate-pulse">
-              <div className="flex items-center gap-4">
-                <div className="w-10 h-10 rounded-xl bg-surface-container" />
-                <div className="flex-1">
-                  <div className="h-4 bg-surface-container rounded w-48 mb-2" />
-                  <div className="h-3 bg-surface-container rounded w-32" />
-                </div>
-              </div>
-            </div>
-          ))
+          <SkeletonCard variant="card-sm" count={4} />
         ) : filtered.length === 0 ? (
           <div className="glass-card p-12 rounded-2xl text-center">
             <p className="text-body-lg text-on-surface-variant">No hay solicitudes</p>
             <p className="text-body-md text-on-surface-variant/60 mt-1">Las solicitudes aparecerán aquí</p>
           </div>
-        ) : filtered.map((req) => {
-          const status = statusConfig[req.status] || { label: req.status, color: '', bg: '', borderColor: '' };
-          return (
-            <div key={req.id} className={`glass-card p-5 rounded-2xl flex flex-col md:flex-row md:items-center gap-4 hover:shadow-md transition-all group border-l-4 ${status.borderColor}`}>
+        ) : (() => {
+          const { individualReqs, batchMap } = groupBatches(filtered);
+          const allItems: any[] = [];
+
+          // Add individual (non-batch) requests first
+          for (const req of individualReqs) {
+            allItems.push({ type: 'individual', req });
+          }
+
+          // Add batch groups
+          for (const [batchId, batchReqs] of batchMap) {
+            allItems.push({ type: 'batch', batchId, batchReqs });
+          }
+
+          return allItems.map((item: any) => {
+            if (item.type === 'individual') {
+              const req = item.req;
+              const status = statusConfig[req.status] || { label: req.status, color: '', bg: '', borderColor: '' };
+              return (
+                <div key={req.id} className={`glass-card p-5 rounded-2xl flex flex-col md:flex-row md:items-center gap-4 hover:shadow-md transition-all group border-l-4 ${status.borderColor}`}>
                   <div className="flex-1 grid grid-cols-1 md:grid-cols-5 gap-3">
-                <div className="flex flex-col gap-2">
-                  {canSelectRequest(req) ? (
-                    <div className="flex items-center gap-2 text-sm text-on-surface">
-                      <input
-                        type="checkbox"
-                        className="h-5 w-5 rounded border-outline-variant text-primary focus:ring-primary"
-                        checked={selectedRequestIds.includes(req.id)}
-                        onChange={() => toggleRequestSelection(req.id)}
-                      />
-                      <span className="font-medium">Seleccionar</span>
+                    <div className="flex flex-col gap-2">
+                      {canSelectRequest(req) ? (
+                        <div className="flex items-center gap-2 text-sm text-on-surface">
+                          <input
+                            type="checkbox"
+                            className="h-5 w-5 rounded border-outline-variant text-primary focus:ring-primary"
+                            checked={selectedRequestIds.includes(req.id)}
+                            onChange={() => toggleRequestSelection(req.id)}
+                          />
+                          <span className="font-medium">Seleccionar</span>
+                        </div>
+                      ) : null}
+                      <div>
+                        <span className="text-[11px] uppercase tracking-wider text-on-surface-variant/60 font-bold">ID Solicitud</span>
+                        <p className="font-mono text-sm font-semibold text-primary mt-0.5">{req.code}</p>
+                      </div>
                     </div>
-                  ) : null}
-                  <div>
-                    <span className="text-[11px] uppercase tracking-wider text-on-surface-variant/60 font-bold">ID Solicitud</span>
-                    <p className="font-mono text-sm font-semibold text-primary mt-0.5">{req.code}</p>
+                    <div>
+                      <span className="text-[11px] uppercase tracking-wider text-on-surface-variant/60 font-bold">Estudiante</span>
+                      <p className="font-semibold text-sm mt-0.5">{getStudentName(req)}</p>
+                    </div>
+                    <div>
+                      <span className="text-[11px] uppercase tracking-wider text-on-surface-variant/60 font-bold">Documento</span>
+                      <p className="text-sm text-on-surface-variant truncate mt-0.5">{getStudentDocument(req)}</p>
+                    </div>
+                    <div>
+                      <span className="text-[11px] uppercase tracking-wider text-on-surface-variant/60 font-bold">Plantilla</span>
+                      <p className="text-sm text-on-surface-variant truncate mt-0.5">{req.template?.name || '—'}</p>
+                    </div>
+                    <div className="hidden md:block">
+                      <span className="text-[11px] uppercase tracking-wider text-on-surface-variant/60 font-bold">Fecha</span>
+                      <p className="text-sm text-on-surface-variant mt-0.5">
+                        {format(new Date(req.created_at), 'dd/MM/yyyy HH:mm')}
+                      </p>
+                    </div>
                   </div>
-                </div>
-                <div>
-                  <span className="text-[11px] uppercase tracking-wider text-on-surface-variant/60 font-bold">Estudiante</span>
-                  <p className="font-semibold text-sm mt-0.5">{getStudentName(req)}</p>
-                </div>
-                <div>
-                  <span className="text-[11px] uppercase tracking-wider text-on-surface-variant/60 font-bold">Documento</span>
-                  <p className="text-sm text-on-surface-variant truncate mt-0.5">{getStudentDocument(req)}</p>
-                </div>
-                <div>
-                  <span className="text-[11px] uppercase tracking-wider text-on-surface-variant/60 font-bold">Plantilla</span>
-                  <p className="text-sm text-on-surface-variant truncate mt-0.5">{req.template?.name || '—'}</p>
-                </div>
-                <div className="hidden md:block">
-                  <span className="text-[11px] uppercase tracking-wider text-on-surface-variant/60 font-bold">Fecha</span>
-                  <p className="text-sm text-on-surface-variant mt-0.5">
-                    {format(new Date(req.created_at), 'dd/MM/yyyy HH:mm')}
-                  </p>
-                </div>
-              </div>
-              <div className="flex items-center justify-between md:justify-end gap-4 border-t md:border-t-0 pt-4 md:pt-0 border-outline-variant/20">
-                <span className={`px-3 py-1.5 rounded-full text-xs font-bold flex items-center gap-1.5 ${status.color} ${status.bg}`}>
-                  <span className={`w-1.5 h-1.5 rounded-full ${status.color.replace('text-', 'bg-')}`} />
-                  {status.label}
-                </span>
-                <div className="flex items-center gap-1">
-                  {(user?.role === 'SIGNER' || user?.role === 'ADMIN') && req.status === 'PENDING' && (
-                    <>
-                      <button onClick={() => setPreviewRequestId(req.id)}
-                        className="p-2 hover:bg-primary/10 rounded-full text-primary transition-colors" title="Vista previa">
-                        <Eye size={18} />
-                      </button>
-                      <button onClick={() => setSelected(selected === req.id ? null : req.id)}
-                        className="p-2 hover:bg-error/10 rounded-full text-error transition-colors" title="Rechazar">
-                        <XCircle size={18} />
-                      </button>
-                      {req.batch_id && (
+                  <div className="flex items-center justify-between md:justify-end gap-4 border-t md:border-t-0 pt-4 md:pt-0 border-outline-variant/20">
+                    <span className={`px-3 py-1.5 rounded-full text-xs font-bold flex items-center gap-1.5 ${status.color} ${status.bg}`}>
+                      <span className={`w-1.5 h-1.5 rounded-full ${status.color.replace('text-', 'bg-')}`} />
+                      {status.label}
+                    </span>
+                    <div className="flex items-center gap-1">
+                      {(user?.role === 'SIGNER' || user?.role === 'ADMIN') && req.status === 'PENDING' && (
+                        <>
+                          <button onClick={() => setPreviewRequestId(req.id)}
+                            className="p-2 hover:bg-primary/10 rounded-full text-primary transition-colors" title="Vista previa">
+                            <Eye size={18} />
+                          </button>
+                          <button onClick={() => setSelected(selected === req.id ? null : req.id)}
+                            className="p-2 hover:bg-error/10 rounded-full text-error transition-colors" title="Rechazar">
+                            <XCircle size={18} />
+                          </button>
+                        </>
+                      )}
+                      {(req.status === 'APPROVED' || req.status === 'SIGNED') && (
                         <button
-                          onClick={() => openBatchModal(req.batch_id)}
-                          className="p-2 hover:bg-secondary/10 rounded-full text-secondary transition-colors"
-                          title="Firmar lote"
+                          onClick={() => setPreviewRequestId(req.id)}
+                          className="p-2 hover:bg-primary/10 rounded-full text-primary transition-colors"
+                          title="Ver certificado"
                         >
-                          <span className="text-sm font-semibold">Lote</span>
+                          <Download size={18} />
                         </button>
                       )}
+                      <button className="p-2 hover:bg-surface-container-high rounded-full text-on-surface-variant transition-colors">
+                        <MoreHorizontal size={18} />
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Reject modal */}
+                  {selected === req.id && (
+                    <div className="absolute mt-2 right-0 top-full z-10 bg-white rounded-2xl shadow-xl border border-outline-variant/30 p-5 w-72 animate-scale-in">
+                      <p className="text-sm font-bold text-on-surface mb-2">Motivo de rechazo</p>
+                      <textarea className="input mb-3" rows={3} value={rejectReason}
+                        onChange={e => setRejectReason(e.target.value)} placeholder="Indica el motivo..." />
+                      <div className="flex gap-2">
+                        <button onClick={() => handleReject(req.id)} className="btn-danger btn-sm flex-1">Rechazar</button>
+                        <button onClick={() => { setSelected(null); setRejectReason(''); }} className="btn-secondary btn-sm">Cancelar</button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            }
+
+            // ── Batch group card ──
+            const { batchId, batchReqs } = item;
+            const isExpanded = expandedBatches.has(batchId);
+            const approvedCount = batchReqs.filter((r: any) => ['APPROVED', 'SIGNED'].includes(r.status)).length;
+            const pendingCount = batchReqs.filter((r: any) => r.status === 'PENDING').length;
+            const firstReq = batchReqs[0];
+            const batchCode = firstReq?.code?.substring(0, 10) || batchId.substring(0, 8);
+            const eligibleDownload = batchReqs.filter((r: any) => r.certificate_url && ['APPROVED', 'SIGNED'].includes(r.status));
+
+            return (
+              <div key={batchId} className="glass-card rounded-2xl overflow-hidden border border-primary/10 hover:shadow-md transition-all">
+                {/* Batch header - always visible */}
+                <button
+                  onClick={() => toggleBatchExpand(batchId)}
+                  className="w-full flex items-center gap-4 p-5 text-left hover:bg-surface-container-low/50 transition-colors"
+                >
+                  <div className="w-10 h-10 rounded-xl bg-secondary/10 flex items-center justify-center shrink-0">
+                    <Package size={20} className="text-secondary" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="font-semibold text-sm text-on-surface">Lote {batchCode}</span>
+                      <span className="px-2 py-0.5 bg-secondary/10 text-secondary text-[10px] font-bold rounded-full">
+                        {batchReqs.length} solicitudes
+                      </span>
+                    </div>
+                    <p className="text-xs text-on-surface-variant/70 mt-0.5">
+                      Creado {format(new Date(firstReq.created_at), 'dd/MM/yyyy')}
+                      {firstReq.template?.name && ` · ${firstReq.template.name}`}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    {pendingCount > 0 && (
+                      <span className="text-xs text-secondary font-semibold">{pendingCount} pendientes</span>
+                    )}
+                    {approvedCount > 0 && (
+                      <span className="text-xs text-primary font-semibold">{approvedCount} aprobados</span>
+                    )}
+                    {isExpanded ? (
+                      <ChevronDown size={20} className="text-on-surface-variant/60 shrink-0" />
+                    ) : (
+                      <ChevronRight size={20} className="text-on-surface-variant/60 shrink-0" />
+                    )}
+                  </div>
+                </button>
+
+                {/* Batch actions bar */}
+                <div className="flex items-center gap-2 px-5 pb-3">
+                  {/* Sign batch (for signers/admins with pending items) */}
+                  {(user?.role === 'SIGNER' || user?.role === 'ADMIN') && pendingCount > 0 && (
+                    <>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); openBatchModal(batchId); }}
+                        className="btn-secondary btn-xs px-3 py-1.5 text-xs"
+                      >
+                        <CheckCircle size={14} /> Firmar lote
+                      </button>
+                      {batchReqs.filter((r: any) => r.status === 'PENDING').slice(0, 3).map((r: any) => (
+                        <button
+                          key={r.id}
+                          onClick={(e) => { e.stopPropagation(); setPreviewRequestId(r.id); }}
+                          className="p-1.5 hover:bg-primary/10 rounded-full text-primary transition-colors"
+                          title={`Vista previa: ${r.code}`}
+                        >
+                          <Eye size={16} />
+                        </button>
+                      ))}
                     </>
                   )}
-                  {(req.status === 'APPROVED' || req.status === 'SIGNED') && (
-                    <button
-                      onClick={() => setPreviewRequestId(req.id)}
-                      className="p-2 hover:bg-primary/10 rounded-full text-primary transition-colors"
-                      title="Ver certificado"
-                    >
-                      <Download size={18} />
-                    </button>
-                  )}
-                  <button className="p-2 hover:bg-surface-container-high rounded-full text-on-surface-variant transition-colors">
-                    <MoreHorizontal size={18} />
+
+                  {/* Download batch ZIP — always visible */}
+                  <button
+                    onClick={(e) => { e.stopPropagation(); downloadBatchAsZip(batchId, batchReqs); }}
+                    disabled={downloading}
+                    className="btn-secondary btn-xs px-3 py-1.5 text-xs"
+                  >
+                    {downloading ? (
+                      <><Loader2 size={14} className="animate-spin" /> {downloadProgress.current}/{downloadProgress.total}</>
+                    ) : (
+                      <><Download size={14} /> Descargar lote ({batchReqs.length})</>
+                    )}
                   </button>
                 </div>
-              </div>
 
-              {/* Reject modal */}
-              {selected === req.id && (
-                <div className="absolute mt-2 right-0 top-full z-10 bg-white rounded-2xl shadow-xl border border-outline-variant/30 p-5 w-72 animate-scale-in">
-                  <p className="text-sm font-bold text-on-surface mb-2">Motivo de rechazo</p>
-                  <textarea className="input mb-3" rows={3} value={rejectReason}
-                    onChange={e => setRejectReason(e.target.value)} placeholder="Indica el motivo..." />
-                  <div className="flex gap-2">
-                    <button onClick={() => handleReject(req.id)} className="btn-danger btn-sm flex-1">Rechazar</button>
-                    <button onClick={() => { setSelected(null); setRejectReason(''); }} className="btn-secondary btn-sm">Cancelar</button>
+                {/* Expanded children */}
+                {isExpanded && (
+                  <div className="border-t border-outline-variant/10 divide-y divide-outline-variant/5 animate-fade-in">
+                    {batchReqs.map((req: any) => {
+                      const status = statusConfig[req.status] || { label: req.status, color: '', bg: '', borderColor: '' };
+                      return (
+                        <div
+                          key={req.id}
+                          className={`flex items-center gap-3 px-5 py-3 hover:bg-surface-container-low/50 transition-colors border-l-4 ${status.borderColor}`}
+                        >
+                          <div className="flex-1 grid grid-cols-1 md:grid-cols-4 gap-2 text-sm">
+                            <div>
+                              <span className="text-[10px] uppercase tracking-wider text-on-surface-variant/50 font-bold block">Código</span>
+                              <span className="font-mono text-xs font-semibold text-primary">{req.code}</span>
+                            </div>
+                            <div>
+                              <span className="text-[10px] uppercase tracking-wider text-on-surface-variant/50 font-bold block">Estudiante</span>
+                              <span className="text-xs text-on-surface">{getStudentName(req)}</span>
+                            </div>
+                            <div>
+                              <span className="text-[10px] uppercase tracking-wider text-on-surface-variant/50 font-bold block">Documento</span>
+                              <span className="text-xs text-on-surface-variant">{getStudentDocument(req)}</span>
+                            </div>
+                            <div className="flex items-center justify-between gap-2">
+                              <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${status.color} ${status.bg}`}>
+                                {status.label}
+                              </span>
+                              <div className="flex items-center gap-1">
+                                {(req.status === 'APPROVED' || req.status === 'SIGNED') && (
+                                  <button
+                                    onClick={(e) => { e.stopPropagation(); setPreviewRequestId(req.id); }}
+                                    className="p-1.5 hover:bg-primary/10 rounded-full text-primary transition-colors"
+                                    title="Ver certificado"
+                                  >
+                                    <Eye size={15} />
+                                  </button>
+                                )}
+                                {user?.role === 'APPLICANT' && isRequestDownloadable(req) && (
+                                  <a
+                                    href={req.certificate_url}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="p-1.5 hover:bg-primary/10 rounded-full text-primary transition-colors"
+                                    title="Descargar"
+                                    onClick={e => e.stopPropagation()}
+                                  >
+                                    <Download size={15} />
+                                  </a>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
-                </div>
+                )}
+              </div>
+            );
+          });
+        })()}
+      </div>
+
+      {/* Pagination - simplified on mobile */}
+      {!loading && totalCount > pageSize && (
+        <div className="flex flex-col sm:flex-row items-center justify-between gap-2 pt-2 pb-4">
+          <p className="text-xs sm:text-sm text-on-surface-variant/70 order-2 sm:order-1">
+            <span className="hidden sm:inline">{(page - 1) * pageSize + 1}–{Math.min(page * pageSize, totalCount)} de {totalCount} resultados</span>
+            <span className="sm:hidden">Pág {page}/{totalPages}</span>
+          </p>
+          <div className="flex items-center gap-1 order-1 sm:order-2">
+            <button
+              onClick={() => setPage(p => Math.max(1, p - 1))}
+              disabled={page === 1}
+              className="px-3 py-2 sm:py-1.5 text-xs font-semibold rounded-lg transition-all disabled:opacity-30 disabled:cursor-not-allowed hover:bg-surface-container-high text-on-surface-variant min-h-[44px]"
+            >
+              ← Anterior
+            </button>
+
+            {/* Page numbers - simplified on mobile */}
+            <div className="hidden sm:flex items-center gap-1">
+              {getPageNumbers().map((p, i) =>
+                p === 'ellipsis' ? (
+                  <span key={`e-${i}`} className="w-8 h-8 flex items-center justify-center text-xs text-on-surface-variant/40">…</span>
+                ) : (
+                  <button
+                    key={p}
+                    onClick={() => setPage(p)}
+                    className={`w-8 h-8 text-xs font-bold rounded-lg transition-all ${
+                      p === page
+                        ? 'bg-primary text-on-primary shadow-sm'
+                        : 'text-on-surface-variant hover:bg-surface-container-high'
+                    }`}
+                  >
+                    {p}
+                  </button>
+                )
               )}
             </div>
-          );
-        })}
-      </div>
+
+            <button
+              onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+              disabled={page === totalPages}
+              className="px-3 py-2 sm:py-1.5 text-xs font-semibold rounded-lg transition-all disabled:opacity-30 disabled:cursor-not-allowed hover:bg-surface-container-high text-on-surface-variant min-h-[44px]"
+            >
+              Siguiente →
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Preview modal */}
       {previewRequestId && user && (
@@ -467,8 +903,8 @@ export function RequestsPage() {
       )}
 
       {showBatchModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4 animate-fade-in">
-          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-hidden">
+        <div className="fixed inset-0 z-50 flex items-end md:items-center justify-center bg-black/50 backdrop-blur-sm p-0 md:p-4 animate-fade-in">
+          <div className="bg-white rounded-t-3xl md:rounded-3xl shadow-2xl w-full md:max-w-2xl max-h-[95vh] md:max-h-[90vh] overflow-hidden animate-slide-up md:animate-scale-in">
             <div className="flex items-center justify-between px-6 py-4 border-b border-outline-variant/20">
               <div>
                 <h2 className="text-lg font-bold text-on-surface">Firmar lote</h2>

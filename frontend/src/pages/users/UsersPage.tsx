@@ -164,10 +164,10 @@ export function UsersPage() {
         </div>
       </div>
 
-      {/* Table */}
+      {/* Table - horizontal scroll on mobile */}
       <div className="glass-card rounded-2xl overflow-hidden border border-white/40">
-        <div className="overflow-x-auto">
-          <table className="w-full">
+        <div className="overflow-x-auto [-webkit-overflow-scrolling:touch]">
+          <table className="w-full min-w-[640px]">
             <thead>
               <tr className="bg-surface-container-low/50 border-b border-outline-variant/20">
                 <th className="text-left px-6 py-4 text-[11px] font-bold text-on-surface-variant uppercase tracking-wider">Usuario</th>
@@ -233,11 +233,11 @@ export function UsersPage() {
         </div>
       </div>
 
-      {/* Create user modal */}
+      {/* Create user modal - full-screen on mobile */}
       {showModal && typeof document !== 'undefined' ? createPortal(
-        <div className="fixed inset-0 z-[1000] flex items-center justify-center p-2 md:p-4 overflow-y-auto">
+        <div className="fixed inset-0 z-[1000] flex items-end md:items-center justify-center md:p-4 overflow-y-auto">
           <div className="absolute inset-0 bg-black/20 backdrop-blur-sm" onClick={() => setShowModal(false)} />
-          <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[85vh] animate-scale-in border border-white/40 overflow-hidden">
+          <div className="relative bg-white rounded-t-3xl md:rounded-2xl shadow-2xl w-full md:max-w-3xl max-h-[95vh] md:max-h-[85vh] animate-slide-up md:animate-scale-in border border-white/40 overflow-hidden">
             {/* Top bar */}
             <div className="sticky top-0 z-10 bg-white flex items-center justify-between px-4 md:px-8 py-5 border-b border-outline-variant/10">
               <div className="flex items-center gap-4">
@@ -387,18 +387,18 @@ export function UsersPage() {
                 </button>
               </div>
 
-              <div className="h-16" />
+              <div className="h-8 md:h-16" />
             </div>
           </div>
         </div>,
         document.body
       ) : null}
 
-      {/* Reset password modal */}
+      {/* Reset password modal - full-screen on mobile */}
       {resetPasswordUser && typeof document !== 'undefined' ? createPortal(
-        <div className="fixed inset-0 z-[1000] flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-[1000] flex items-end md:items-center justify-center p-0 md:p-4">
           <div className="absolute inset-0 bg-black/20 backdrop-blur-sm" onClick={() => setResetPasswordUser(null)} />
-          <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-md animate-scale-in border border-white/40 overflow-hidden">
+          <div className="relative bg-white rounded-t-3xl md:rounded-2xl shadow-2xl w-full md:max-w-md animate-slide-up md:animate-scale-in border border-white/40 overflow-hidden">
             <div className="flex items-center justify-between px-6 py-5 border-b border-outline-variant/10">
               <div className="flex items-center gap-3">
                 <div className="w-10 h-10 rounded-xl bg-warning-500/10 flex items-center justify-center">

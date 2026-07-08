@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { supabase } from '../../lib/supabase';
+import { auditApi, getClientIP } from '../../services/api';
 import { X, CheckCircle, XCircle, Download, FileText, Loader2, Signature, Printer } from 'lucide-react';
 import { QRCodeCanvas } from 'qrcode.react';
 import QRCode from 'qrcode';
@@ -56,7 +57,7 @@ function formatDateToSpanish(dateStr: string): string {
 }
 
 /** Converts all date-like strings in data to Spanish text */
-function convertDatesInData(data: Record<string, any>): Record<string, any> {
+export function convertDatesInData(data: Record<string, any>): Record<string, any> {
   const result: Record<string, any> = {};
   for (const [key, value] of Object.entries(data)) {
     if (typeof value === 'string') {
@@ -74,7 +75,7 @@ function convertDatesInData(data: Record<string, any>): Record<string, any> {
 }
 
 /** Replaces {{variable}} placeholders with actual data values */
-function fillTemplate(content: string, data: Record<string, any>): string {
+export function fillTemplate(content: string, data: Record<string, any>): string {
   return content.replace(/\{\{(\w+)\}\}/g, (_, key) => {
     const value = data[key];
     if (value === null || value === undefined) return `{{${key}}}`;
@@ -83,7 +84,7 @@ function fillTemplate(content: string, data: Record<string, any>): string {
 }
 
 // Safe JSON parse helper
-const safeJsonParse = (str: string) => { try { return JSON.parse(str); } catch { return {}; } };
+export const safeJsonParse = (str: string) => { try { return JSON.parse(str); } catch { return {}; } };
 
 // ── Direct PDF generation (no html2canvas) ──
 
@@ -148,7 +149,7 @@ async function loadImageToDataUrl(url: string): Promise<string | null> {
  * Generates a PDF by rendering each template element directly with jsPDF.
  * No html2canvas involved — text is vector, images are native resolution.
  */
-async function renderTemplateToPdf(
+export async function renderTemplateToPdf(
   elements: TemplateElement[],
   pageOrientation: string,
   pageWidth: number,
@@ -158,7 +159,6 @@ async function renderTemplateToPdf(
 ): Promise<jsPDF> {
   const orientation = pageOrientation === 'landscape' ? 'l' : 'p';
   const pdf = new jsPDF(orientation, 'pt', [pageWidth, pageHeight]);
-  const PADDING = 5; // pt padding inside element bounds
 
   for (const el of elements) {
     const content = fillTemplate(el.content, requestData);
@@ -179,10 +179,27 @@ async function renderTemplateToPdf(
             pdf.setFont(mapFont(el.fontFamily), mapFontStyle(el.bold, el.italic));
             pdf.setFontSize(fontSize);
             pdf.setTextColor(rgb[0], rgb[1], rgb[2]);
-            pdf.text(content, x + PADDING, y + PADDING, {
-              maxWidth: w - PADDING * 2,
-              align: el.align || 'left',
-              baseline: 'top',
+
+            const align = el.align || 'left';
+            const p = 4; // pt padding, matching preview's 4px
+
+            // Horizontal position depends on alignment (jsPDF centers/ends text at the x coordinate)
+            let textX: number;
+            if (align === 'center') {
+              textX = x + w / 2;
+            } else if (align === 'right') {
+              textX = x + w - p;
+            } else {
+              textX = x + p;
+            }
+
+            // Vertically center within element bounds (matching preview's align-items: center)
+            const textY = y + h / 2;
+
+            pdf.text(content, textX, textY, {
+              maxWidth: w - p * 2,
+              align,
+              baseline: 'middle',
             });
           }
           break;
@@ -307,11 +324,18 @@ export function CertificatePreview({
 
       // 3. Load authorized signatures for this institution
       if (userInstitutionId) {
-        const { data: sigs } = await supabase
+        let sigQuery = supabase
           .from('authorized_signatures')
           .select('id, full_name, title, signature_image_url, document_id, is_primary')
           .eq('institution_id', userInstitutionId)
-          .eq('is_active', true)
+          .eq('is_active', true);
+
+        // 🔒 SIGNER users can ONLY see their own assigned signatures
+        if (userRole === 'SIGNER') {
+          sigQuery = sigQuery.eq('user_id', userId);
+        }
+
+        const { data: sigs } = await sigQuery
           .order('is_primary', { ascending: false })
           .order('full_name');
 
@@ -508,9 +532,11 @@ export function CertificatePreview({
         updateData.consecutive_number = generatedRadicado.code;
       }
 
+      let selectedSigForAudit: any = null;
       if (selectedSignatureId) {
         const selectedSig = signatures.find(s => s.id === selectedSignatureId);
         if (selectedSig) {
+          selectedSigForAudit = selectedSig;
           updateData.reviewer_notes = JSON.stringify({
             signature_id: selectedSignatureId,
             signature_name: selectedSig.full_name,
@@ -526,6 +552,22 @@ export function CertificatePreview({
         .eq('id', requestId);
 
       if (error) throw error;
+
+      // ── Audit log: firma aprobada ──
+      try {
+        const ip = await getClientIP();
+        await auditApi.log({
+          user_id: userId,
+          user_email: (await supabase.auth.getUser()).data.user?.email || undefined,
+          module: 'signatures',
+          action: 'sign',
+          entity_id: requestId,
+          entity_type: 'certificate_request',
+          ip_address: ip,
+          description: `Firma aprobada - ${selectedSigForAudit?.full_name || 'Firmante'} (${selectedSigForAudit?.title || ''}) - Solicitud: ${requestCode || requestId}`,
+        });
+      } catch { /* silent */ }
+
       toast.success('✅ Solicitud aprobada');
 
       if (userRole === 'SIGNER' || userRole === 'ADMIN') {
@@ -560,6 +602,22 @@ export function CertificatePreview({
         .eq('id', requestId);
 
       if (error) throw error;
+
+      // ── Audit log: firma rechazada ──
+      try {
+        const ip = await getClientIP();
+        await auditApi.log({
+          user_id: userId,
+          user_email: (await supabase.auth.getUser()).data.user?.email || undefined,
+          module: 'signatures',
+          action: 'reject',
+          entity_id: requestId,
+          entity_type: 'certificate_request',
+          ip_address: ip,
+          description: `Firma rechazada - Motivo: ${rejectReason} - Solicitud: ${requestCode || requestId}`,
+        });
+      } catch { /* silent */ }
+
       toast.success('Solicitud rechazada');
       onApproved();
       onClose();

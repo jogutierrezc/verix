@@ -1,11 +1,10 @@
 import { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { supabase } from '../../lib/supabase';
-import {
-  Plus, Search, Building2, Trash2, Edit3, ChevronDown, ChevronRight,
+import { supabase } from '../../lib/supabase';import { Plus, Search, Building2, Trash2, Edit3, ChevronDown, ChevronRight,
   Layers, Users, UserCheck, UserPlus, X, Save, Hash
 } from 'lucide-react';
 import toast from 'react-hot-toast';
+import { SkeletonCard } from '../../components/ui/SkeletonCard';
 
 interface Institution {
   id: string;
@@ -325,14 +324,7 @@ export function InstitutionsPage() {
       {/* Institutions list */}
       <div className="space-y-3">
         {loading ? (
-          [...Array(3)].map((_, i) => (
-            <div key={i} className="glass-card p-6 rounded-2xl animate-pulse">
-              <div className="flex items-center gap-4">
-                <div className="w-12 h-12 bg-surface-container rounded-xl" />
-                <div className="flex-1"><div className="h-5 bg-surface-container rounded w-3/4 mb-2" /><div className="h-4 bg-surface-container rounded w-1/2" /></div>
-              </div>
-            </div>
-          ))
+          <SkeletonCard variant="card" count={3} />
         ) : filtered.length === 0 ? (
           <div className="glass-card p-16 rounded-2xl text-center">
             <Building2 size={48} className="mx-auto text-surface-variant mb-4" />
@@ -536,11 +528,11 @@ export function InstitutionsPage() {
         })}
       </div>
 
-      {/* Institution Modal */}
+      {/* Institution Modal - full-screen on mobile */}
       {showInstModal && typeof document !== 'undefined' ? createPortal(
-        <div className="fixed inset-0 z-[1000] flex items-center justify-center p-4 overflow-y-auto">
+        <div className="fixed inset-0 z-[1000] flex items-end md:items-center justify-center md:p-4 overflow-y-auto">
           <div className="absolute inset-0 bg-black/20 backdrop-blur-sm" onClick={() => setShowInstModal(false)} />
-          <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[85vh] animate-scale-in border border-white/40 overflow-hidden">
+          <div className="relative bg-white rounded-t-3xl md:rounded-2xl shadow-2xl w-full md:max-w-lg max-h-[95vh] md:max-h-[85vh] animate-slide-up md:animate-scale-in border border-white/40 overflow-hidden">
             <div className="sticky top-0 z-10 bg-white flex items-center justify-between px-6 py-4 border-b border-outline-variant/10">
               <h3 className="text-lg font-bold text-on-surface">
                 {editInstId ? 'Editar institución' : 'Nueva institución'}

@@ -20,6 +20,13 @@ export interface TemplateElement {
   fieldKey?: string;
 }
 
+export interface CanvasMargins {
+  top: number;
+  bottom: number;
+  left: number;
+  right: number;
+}
+
 interface TemplateCanvasProps {
   elements: TemplateElement[];
   onChange: (elements: TemplateElement[]) => void;
@@ -27,6 +34,7 @@ interface TemplateCanvasProps {
   onImageUpload?: (file: File) => Promise<string>;
   onSelectElement?: (element: TemplateElement | null) => void;
   selectedElementId?: string | null;
+  margins?: CanvasMargins;
 }
 
 const DEFAULT_ELEMENTS: Record<string, Partial<TemplateElement>> = {
@@ -58,9 +66,10 @@ export function TemplateCanvas({
   onImageUpload,
   onSelectElement,
   selectedElementId,
+  margins,
 }: TemplateCanvasProps) {
   const canvasRef = useRef<HTMLDivElement>(null);
-  const dragRef = useRef<{ id: string; offsetX: number; offsetY: number } | null>(null);
+  const dragRef = useRef<{ id: string; offsetX: number; offsetY: number; startX: number; startY: number; moved: boolean } | null>(null);
   const resizeRef = useRef<{ id: string; startX: number; startY: number; startW: number; startH: number } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -150,14 +159,25 @@ export function TemplateCanvas({
     const target = e.target as HTMLElement;
     if (target.classList.contains('resize-handle')) return;
 
+    // Store initial state — drag only starts after moving > 5px threshold
     dragRef.current = {
       id,
       offsetX: e.clientX / scale - el.x,
       offsetY: e.clientY / scale - el.y,
+      startX: e.clientX,
+      startY: e.clientY,
+      moved: false,
     };
 
     const handleMouseMove = (e: MouseEvent) => {
       if (!dragRef.current) return;
+      const dx = Math.abs(e.clientX - dragRef.current.startX);
+      const dy = Math.abs(e.clientY - dragRef.current.startY);
+
+      // Require 5px movement before starting drag
+      if (!dragRef.current.moved && (dx < 5 && dy < 5)) return;
+      dragRef.current.moved = true;
+
       const newX = Math.max(0, e.clientX / scale - dragRef.current.offsetX);
       const newY = Math.max(0, e.clientY / scale - dragRef.current.offsetY);
       updateElement(dragRef.current.id, { x: newX, y: newY });
@@ -416,6 +436,75 @@ export function TemplateCanvas({
               backgroundSize: '20px 20px',
             }}
           />
+
+          {/* Margin guides */}
+          {margins && (
+            <>
+              {/* Top margin zone */}
+              <div
+                className="absolute pointer-events-none"
+                style={{
+                  top: 0,
+                  left: 0,
+                  right: 0,
+                  height: margins.top * scale,
+                  background: 'repeating-linear-gradient(135deg, rgba(186,26,26,0.04), rgba(186,26,26,0.04) 8px, transparent 8px, transparent 16px)',
+                  borderBottom: '1px dashed rgba(186,26,26,0.25)',
+                  zIndex: 1,
+                }}
+              />
+              {/* Bottom margin zone */}
+              <div
+                className="absolute pointer-events-none"
+                style={{
+                  bottom: 0,
+                  left: 0,
+                  right: 0,
+                  height: margins.bottom * scale,
+                  background: 'repeating-linear-gradient(135deg, rgba(186,26,26,0.04), rgba(186,26,26,0.04) 8px, transparent 8px, transparent 16px)',
+                  borderTop: '1px dashed rgba(186,26,26,0.25)',
+                  zIndex: 1,
+                }}
+              />
+              {/* Left margin zone */}
+              <div
+                className="absolute pointer-events-none"
+                style={{
+                  top: margins.top * scale,
+                  left: 0,
+                  width: margins.left * scale,
+                  height: (height - margins.top - margins.bottom) * scale,
+                  background: 'repeating-linear-gradient(135deg, rgba(186,26,26,0.04), rgba(186,26,26,0.04) 8px, transparent 8px, transparent 16px)',
+                  borderRight: '1px dashed rgba(186,26,26,0.25)',
+                  zIndex: 1,
+                }}
+              />
+              {/* Right margin zone */}
+              <div
+                className="absolute pointer-events-none"
+                style={{
+                  top: margins.top * scale,
+                  right: 0,
+                  width: margins.right * scale,
+                  height: (height - margins.top - margins.bottom) * scale,
+                  background: 'repeating-linear-gradient(135deg, rgba(186,26,26,0.04), rgba(186,26,26,0.04) 8px, transparent 8px, transparent 16px)',
+                  borderLeft: '1px dashed rgba(186,26,26,0.25)',
+                  zIndex: 1,
+                }}
+              />
+              {/* Inner safe-area label */}
+              <div
+                className="absolute pointer-events-none text-[8px] font-bold text-red-300/40 uppercase tracking-wider"
+                style={{
+                  top: Math.max(margins.top * scale - 14, 2),
+                  left: margins.left * scale + 4,
+                  zIndex: 2,
+                }}
+              >
+                Área segura
+              </div>
+            </>
+          )}
 
           {elements.map(renderElement)}
 

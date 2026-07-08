@@ -142,6 +142,7 @@ export default {
         'slide-down': 'slideDown 0.3s ease-out',
         'scale-in': 'scaleIn 0.2s ease-out',
         'float': 'float 6s ease-in-out infinite',
+        'shimmer': 'shimmer 1.8s ease-in-out infinite',
       },
 
       keyframes: {
@@ -165,6 +166,10 @@ export default {
           '0%': { transform: 'translateY(0px)' },
           '50%': { transform: 'translateY(-20px)' },
           '100%': { transform: 'translateY(0px)' },
+        },
+        shimmer: {
+          '0%': { transform: 'translateX(-100%)' },
+          '100%': { transform: 'translateX(200%)' },
         },
       },
     },

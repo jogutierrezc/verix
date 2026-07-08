@@ -70,15 +70,9 @@ export function Layout({ children }: { children: React.ReactNode }) {
 
       {/* Desktop Sidebar - w-80 for more breathing room */}
       <aside className="hidden lg:flex flex-col h-screen w-[320px] sticky top-0 bg-surface/70 backdrop-blur-xl border-r border-white/20 shadow-lg z-30">
-        {/* Logo - more padding */}
-        <div className="px-10 pt-10 pb-8 flex items-center gap-4">
-          <div className="w-12 h-12 bg-primary rounded-2xl flex items-center justify-center shadow-lg shadow-primary/20">
-            <span className="text-on-primary font-bold text-xl">V</span>
-          </div>
-          <div>
-            <h1 className="text-[26px] font-bold text-primary leading-tight tracking-tight">VERIX</h1>
-            <p className="text-[10px] font-bold text-on-surface-variant/50 uppercase tracking-[0.15em]">Institutional</p>
-          </div>
+        {/* Logo */}
+        <div className="px-10 pt-10 pb-8">
+          <img src="/Logo%20Verix.png" alt="VERIX" className="h-14 w-auto" />
         </div>
 
         {/* Navigation - wider padding */}
@@ -140,11 +134,8 @@ export function Layout({ children }: { children: React.ReactNode }) {
             >
               <Menu size={24} className="text-on-surface" />
             </button>
-            <div className="lg:hidden flex items-center gap-2">
-              <div className="w-9 h-9 bg-primary rounded-xl flex items-center justify-center shadow-sm">
-                <span className="text-on-primary font-bold text-base">V</span>
-              </div>
-              <span className="text-[22px] font-bold text-primary tracking-tight">VERIX</span>
+            <div className="lg:hidden">
+              <img src="/Logo%20Verix.png" alt="VERIX" className="h-8 w-auto" />
             </div>
           </div>
 
@@ -204,11 +195,8 @@ export function Layout({ children }: { children: React.ReactNode }) {
         }`}>
           <div className="flex flex-col h-full">
             <div className="flex items-center justify-between px-6 h-16 border-b border-white/20">
-              <div className="flex items-center gap-3">
-                <div className="w-9 h-9 bg-primary rounded-xl flex items-center justify-center shadow-sm">
-                  <span className="text-on-primary font-bold text-base">V</span>
-                </div>
-                <span className="text-xl font-bold text-primary tracking-tight">VERIX</span>
+              <div className="flex items-center gap-3 px-2">
+                <img src="/Logo%20Verix.png" alt="VERIX" className="h-8 w-auto" />
               </div>
               <button
                 onClick={() => setSidebarOpen(false)}

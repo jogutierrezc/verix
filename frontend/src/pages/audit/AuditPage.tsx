@@ -46,6 +46,7 @@ export function AuditPage() {
     templates: 'bg-surface-variant text-on-surface-variant',
     certificates: 'bg-primary-fixed text-on-primary-fixed',
     institutions: 'bg-secondary/10 text-secondary',
+    signatures: 'bg-primary/10 text-primary',
   };
 
   return (
@@ -69,6 +70,7 @@ export function AuditPage() {
             <option value="templates">Plantillas</option>
             <option value="certificates">Certificados</option>
             <option value="institutions">Instituciones</option>
+            <option value="signatures">Firmas</option>
           </select>
           <button onClick={loadLogs} className="btn-secondary btn-sm"><RefreshCw size={16} /></button>
           <button onClick={handleExport} className="btn-primary btn-sm"><Download size={16} /> Exportar</button>
@@ -76,8 +78,8 @@ export function AuditPage() {
       </div>
 
       <div className="glass-card rounded-2xl overflow-hidden border border-white/40">
-        <div className="overflow-x-auto">
-          <table className="w-full">
+        <div className="overflow-x-auto [-webkit-overflow-scrolling:touch]">
+          <table className="w-full min-w-[700px]">
             <thead>
               <tr className="bg-surface-container-low/50 border-b border-outline-variant/20">
                 <th className="text-left px-6 py-4 text-[11px] font-bold text-on-surface-variant uppercase tracking-wider">Fecha/Hora</th>

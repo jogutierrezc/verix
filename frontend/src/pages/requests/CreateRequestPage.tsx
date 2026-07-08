@@ -6,6 +6,7 @@ import { ArrowLeft, Save, FileText, Upload, Table, AlertCircle, CheckCircle, Dow
 import { requestsApi } from '../../services/api';
 import toast from 'react-hot-toast';
 import * as XLSX from 'xlsx';
+import { SkeletonCard } from '../../components/ui/SkeletonCard';
 
 /** Variables del sistema que se asignan automáticamente (no se muestran al usuario) */
 const SYSTEM_VARS = new Set(['codigo', 'codigo_certificado', 'radicado', 'consecutivo']);
@@ -331,14 +332,7 @@ export function CreateRequestPage() {
   if (loadingTemplates) {
     return (
       <div className="max-w-3xl mx-auto space-y-6 animate-fade-in">
-        <div className="glass-card p-8 rounded-2xl animate-pulse">
-          <div className="space-y-4">
-            <div className="h-6 bg-surface-container rounded w-48" />
-            <div className="h-4 bg-surface-container rounded w-64" />
-            <div className="h-10 bg-surface-container rounded" />
-            <div className="h-10 bg-surface-container rounded" />
-          </div>
-        </div>
+        <SkeletonCard variant="form" count={1} className="max-w-3xl" />
       </div>
     );
   }

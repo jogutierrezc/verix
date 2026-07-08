@@ -6,6 +6,7 @@ import { templatesApi } from '../../services/api';
 import { Plus, Search, Edit3, Copy, Trash2, FileSpreadsheet } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { format } from 'date-fns';
+import { SkeletonCard } from '../../components/ui/SkeletonCard';
 
 export function TemplatesPage() {
   const { user } = useAuth();
@@ -93,17 +94,7 @@ export function TemplatesPage() {
       {/* Grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
         {loading ? (
-          [...Array(3)].map((_, i) => (
-            <div key={i} className="glass-card p-6 rounded-2xl animate-pulse">
-              <div className="flex items-start gap-4">
-                <div className="w-12 h-12 bg-surface-container rounded-xl" />
-                <div className="flex-1">
-                  <div className="h-5 bg-surface-container rounded w-3/4 mb-2" />
-                  <div className="h-4 bg-surface-container rounded w-1/2" />
-                </div>
-              </div>
-            </div>
-          ))
+          <SkeletonCard variant="card" count={3} />
         ) : filtered.length === 0 ? (
           <div className="col-span-full text-center py-16">
             <FileSpreadsheet size={48} className="mx-auto text-surface-variant mb-4" />

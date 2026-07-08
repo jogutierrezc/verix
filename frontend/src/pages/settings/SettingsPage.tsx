@@ -3,7 +3,7 @@ import { useAuth } from '../../hooks/useAuth';
 import { supabase } from '../../lib/supabase';
 import { SignaturePad } from '../../components/signature/SignaturePad';
 import { authorizedSignaturesApi, userCertificatesApi } from '../../services/api';
-import { User, Shield, Key, Save, Pen, ChevronRight, Info, Users, Plus, Trash2, Star, X, Upload, FileKey, ShieldCheck, AlertTriangle, Clock, CheckCircle } from 'lucide-react';
+import { User, Shield, Key, Save, Pen, ChevronRight, Info, Users, Plus, Trash2, Star, X, Upload, FileKey, ShieldCheck, AlertTriangle, Clock, CheckCircle, UserCheck } from 'lucide-react';
 import toast from 'react-hot-toast';
 import forge from 'node-forge';
 
@@ -23,6 +23,13 @@ export function SettingsPage() {
     title: '',
     document_id: '',
   });
+  // Signature assignment: ADMIN can assign to a specific SIGNER user
+  const [assignedUserId, setAssignedUserId] = useState<string>('');
+  const [signerUsers, setSignerUsers] = useState<any[]>([]);
+
+  // Stats for the footer cards
+  const [stats, setStats] = useState({ totalSigned: 0, pending: 0, p12Certificates: 0 });
+  const [statsLoading, setStatsLoading] = useState(true);
 
   // P12 Certificate state
   const [p12Certificate, setP12Certificate] = useState<any>(null);
@@ -44,20 +51,77 @@ export function SettingsPage() {
   }, [user]);
 
   useEffect(() => {
+    loadStats();
+  }, [user?.id]);
+
+  useEffect(() => {
     if (activeTab === 'signatories' && user?.id) {
       loadSignatories();
+      // ADMIN can load SIGNER users for assignment
+      if (user?.role === 'ADMIN' && (user as any).institution_id) {
+        loadSignerUsers();
+      }
     }
     if (activeTab === 'signature' && user?.id) {
       loadP12Certificate();
     }
   }, [activeTab, user?.id]);
 
+  const loadStats = async () => {
+    if (!user?.id) return;
+    setStatsLoading(true);
+    try {
+      const instId = (user as any).institution_id;
+
+      // Base query scoped to institution if available
+      const signedQuery = supabase
+        .from('certificate_requests')
+        .select('*', { count: 'exact', head: true })
+        .in('status', ['APPROVED', 'SIGNED']);
+
+      const pendingQuery = supabase
+        .from('certificate_requests')
+        .select('*', { count: 'exact', head: true })
+        .eq('status', 'PENDING');
+
+      if (user.role !== 'ADMIN') {
+        signedQuery.eq('user_id', user.id);
+        pendingQuery.eq('user_id', user.id);
+      }
+
+      const [signedRes, pendingRes, p12Res] = await Promise.all([
+        signedQuery,
+        pendingQuery,
+        supabase
+          .from('user_certificates')
+          .select('*', { count: 'exact', head: true })
+          .eq('is_active', true)
+          .eq('institution_id', instId || ''),
+      ]);
+
+      setStats({
+        totalSigned: signedRes.count || 0,
+        pending: pendingRes.count || 0,
+        p12Certificates: p12Res.count || 0,
+      });
+    } catch (err) {
+      console.error('Error loading stats:', err);
+    } finally {
+      setStatsLoading(false);
+    }
+  };
+
   const loadSignatories = async () => {
     setSignatoriesLoading(true);
     try {
-      const { data } = await authorizedSignaturesApi.findAll({
+      const params: any = {
         institutionId: (user as any).institution_id || undefined,
-      });
+      };
+      // 🔒 SIGNER users can only see their OWN signatures
+      if (user?.role === 'SIGNER') {
+        params.userId = user.id;
+      }
+      const { data } = await authorizedSignaturesApi.findAll(params);
       setSignatories(data || []);
     } catch (err: any) {
       console.error('Error loading signatories:', err);
@@ -84,10 +148,10 @@ export function SettingsPage() {
     }
   };
 
-  const handleUpdatePassword = async () => {
-    const currentPw = (document.getElementById('current-pw') as HTMLInputElement)?.value;
-    const newPw = (document.getElementById('new-pw') as HTMLInputElement)?.value;
-    const confirmPw = (document.getElementById('confirm-pw') as HTMLInputElement)?.value;
+  const handleUpdatePassword = async (prefix: string = '') => {
+    const currentPw = (document.getElementById(`${prefix}current-pw`) as HTMLInputElement)?.value;
+    const newPw = (document.getElementById(`${prefix}new-pw`) as HTMLInputElement)?.value;
+    const confirmPw = (document.getElementById(`${prefix}confirm-pw`) as HTMLInputElement)?.value;
 
     if (!currentPw || !newPw) { toast.error('Completa todos los campos'); return; }
     if (newPw !== confirmPw) { toast.error('Las contraseñas no coinciden'); return; }
@@ -97,11 +161,27 @@ export function SettingsPage() {
       const { error } = await supabase.auth.updateUser({ password: newPw });
       if (error) throw error;
       toast.success('Contraseña actualizada');
-      (document.getElementById('current-pw') as HTMLInputElement).value = '';
-      (document.getElementById('new-pw') as HTMLInputElement).value = '';
-      (document.getElementById('confirm-pw') as HTMLInputElement).value = '';
+      (document.getElementById(`${prefix}current-pw`) as HTMLInputElement).value = '';
+      (document.getElementById(`${prefix}new-pw`) as HTMLInputElement).value = '';
+      (document.getElementById(`${prefix}confirm-pw`) as HTMLInputElement).value = '';
     } catch (err: any) {
       toast.error(err.message);
+    }
+  };
+
+  /** Loads SIGNER users in the same institution for assignment */
+  const loadSignerUsers = async () => {
+    try {
+      const { data } = await supabase
+        .from('users')
+        .select('id, first_name, last_name, email')
+        .eq('institution_id', (user as any).institution_id)
+        .eq('role', 'SIGNER')
+        .eq('status', 'ACTIVE')
+        .order('first_name');
+      setSignerUsers(data || []);
+    } catch (err) {
+      console.error('Error loading signer users:', err);
     }
   };
 
@@ -110,17 +190,33 @@ export function SettingsPage() {
       toast.error('Nombre y cargo son requeridos');
       return;
     }
+
+    // ADMIN: use assigned user or current; SIGNER: always use themselves
+    const targetUserId = user?.role === 'ADMIN' && assignedUserId
+      ? assignedUserId
+      : (user?.id || '');
+
     try {
       const result = await authorizedSignaturesApi.create({
-        user_id: user?.id || '',
+        user_id: targetUserId,
         institution_id: (user as any).institution_id || '',
         title: newSignatory.title,
         full_name: newSignatory.full_name,
         document_id: newSignatory.document_id || undefined,
         is_primary: signatories.length === 0,
+        is_active: true,
       });
-      toast.success('Firmante agregado');
+
+      const assignedUser = user?.role === 'ADMIN' && assignedUserId
+        ? signerUsers.find(u => u.id === assignedUserId)
+        : null;
+      toast.success(assignedUser
+        ? `Firma asignada a ${assignedUser.first_name} ${assignedUser.last_name}`
+        : 'Firmante agregado'
+      );
+
       setShowAddModal(false);
+      setAssignedUserId('');
       setNewSignatory({ full_name: '', title: '', document_id: '' });
       loadSignatories();
     } catch (err: any) {
@@ -374,7 +470,7 @@ export function SettingsPage() {
   };
 
   const canSign = user?.role === 'SIGNER' || user?.role === 'ADMIN';
-  const canManageSignatories = user?.role === 'ADMIN' || user?.role === 'SIGNER';
+  const canManageSignatories = user?.role === 'ADMIN';
 
   const tabs = [
     { id: 'personal', icon: User, label: 'Información Personal' },
@@ -396,31 +492,33 @@ export function SettingsPage() {
       </div>
 
       {/* Glass panel with tabs */}
-      <div className="glass-card rounded-2xl overflow-hidden flex flex-col md:flex-row min-h-[600px] border border-white/40">
-        {/* Left sidebar tabs */}
-        <div className="w-full md:w-64 bg-white/30 border-b md:border-b-0 md:border-r border-white/20 p-4 space-y-1">
-          {tabs.map(tab => {
-            const Icon = tab.icon;
-            const isActive = activeTab === tab.id;
-            return (
-              <button
-                key={tab.id}
-                onClick={() => setActiveTab(tab.id)}
-                className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl text-body-md transition-all ${
-                  isActive
-                    ? 'bg-primary text-on-primary shadow-md'
-                    : 'text-on-surface-variant hover:bg-white/40'
-                }`}
-              >
-                <Icon size={20} />
-                <span className="font-medium">{tab.label}</span>
-              </button>
-            );
-          })}
+      <div className="glass-card rounded-2xl overflow-hidden flex flex-col md:flex-row min-h-[80vh] md:min-h-[600px] border border-white/40">
+        {/* Left sidebar tabs - horizontal scroll on mobile */}
+        <div className="w-full md:w-64 bg-white/30 border-b md:border-b-0 md:border-r border-white/20 overflow-x-auto [&::-webkit-scrollbar]:hidden">
+          <div className="flex md:flex-col p-4 gap-1 min-w-max md:min-w-0">
+            {tabs.map(tab => {
+              const Icon = tab.icon;
+              const isActive = activeTab === tab.id;
+              return (
+                <button
+                  key={tab.id}
+                  onClick={() => setActiveTab(tab.id)}
+                  className={`flex items-center gap-3 px-4 py-3 rounded-xl text-body-md transition-all whitespace-nowrap ${
+                    isActive
+                      ? 'bg-primary text-on-primary shadow-md'
+                      : 'text-on-surface-variant hover:bg-white/40 active:bg-white/60'
+                  }`}
+                >
+                  <Icon size={20} />
+                  <span className="font-medium">{tab.label}</span>
+                </button>
+              );
+            })}
+          </div>
         </div>
 
         {/* Right content panel */}
-        <div className="flex-1 p-8 overflow-y-auto">
+        <div className="flex-1 p-4 md:p-8 overflow-y-auto">
           {/* PERSONAL INFO */}
           {activeTab === 'personal' && (
             <section className="animate-fade-in">
@@ -464,6 +562,36 @@ export function SettingsPage() {
                   <Save size={16} /> {loading ? 'Guardando...' : 'Guardar cambios'}
                 </button>
               </div>
+
+              {/* ── Change password (inline in profile) ── */}
+              <div className="mt-12 pt-8 border-t border-white/20">
+                <h4 className="text-headline-sm font-headline-sm text-on-surface mb-6">Cambiar Contraseña</h4>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
+                  <div>
+                    <label className="label">Contraseña actual</label>
+                    <input id="profile-current-pw" className="input" type="password" placeholder="••••••••" />
+                  </div>
+                  <div>
+                    <label className="label">Nueva contraseña</label>
+                    <input id="profile-new-pw" className="input" type="password" placeholder="Mínimo 6 caracteres" />
+                  </div>
+                  <div>
+                    <label className="label">Confirmar</label>
+                    <input id="profile-confirm-pw" className="input" type="password" placeholder="••••••••" />
+                  </div>
+                </div>
+                <div className="flex justify-end mt-6">
+                  <button
+                    onClick={() => handleUpdatePassword('profile-')}
+                    className="btn-primary"
+                  >
+                    <Key size={16} /> Actualizar contraseña
+                  </button>
+                </div>
+                <p className="text-xs text-on-surface-variant/60 mt-3 text-right">
+                  También puedes cambiar tu contraseña desde la pestaña Seguridad.
+                </p>
+              </div>
             </section>
           )}
 
@@ -500,7 +628,7 @@ export function SettingsPage() {
                       <input id="confirm-pw" className="input" type="password" placeholder="••••••••" />
                     </div>
                   </div>
-                  <button onClick={handleUpdatePassword} className="btn-primary">
+                  <button onClick={() => handleUpdatePassword()} className="btn-primary">
                     <Key size={16} /> Actualizar contraseña
                   </button>
                 </div>
@@ -536,8 +664,47 @@ export function SettingsPage() {
                   <SignaturePad
                     userId={user?.id || ''}
                     currentSignatureUrl={(user as any).signature_url}
-                    onSave={() => refreshUser()}
+                    onSave={async (url: string) => {
+                      // For SIGNER users, also create/update an authorized_signature
+                      // so the signature appears in the certificate approval flow
+                      if (user?.role === 'SIGNER' && user?.institution_id && url) {
+                        try {
+                          const { data: existing } = await authorizedSignaturesApi.findAll({
+                            institutionId: user.institution_id,
+                            userId: user.id,
+                          });
+
+                          const personalSig = existing?.find((s: any) => s.title === 'Firma Personal');
+
+                          if (personalSig) {
+                            await authorizedSignaturesApi.update(personalSig.id, {
+                              signature_image_url: url,
+                              is_active: true,
+                            });
+                          } else {
+                            await authorizedSignaturesApi.create({
+                              user_id: user.id,
+                              institution_id: user.institution_id,
+                              title: 'Firma Personal',
+                              full_name: `${user.first_name} ${user.last_name}`.trim() || 'Firmante',
+                              signature_image_url: url,
+                              is_primary: true,
+                              is_active: true,
+                            });
+                          }
+                        } catch (err) {
+                          console.warn('⚠️ No se pudo sincronizar firma personal con autorizadas:', err);
+                        }
+                      }
+                      refreshUser();
+                    }}
                   />
+                  {user?.role === 'SIGNER' && (
+                    <p className="text-xs text-on-surface-variant/70 flex items-center gap-1.5">
+                      <Info size={12} className="shrink-0" />
+                      Tu firma personal estará disponible al aprobar certificados.
+                    </p>
+                  )}
                 </div>
 
                 {/* Digital Certificate — P12/PFX */}
@@ -786,11 +953,37 @@ export function SettingsPage() {
                   <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md animate-scale-in my-8 border border-white/40">
                     <div className="flex items-center justify-between border-b border-outline-variant/10 px-6 py-4">
                       <h4 className="text-lg font-bold text-on-surface">Nuevo Firmante Autorizado</h4>
-                      <button onClick={() => setShowAddModal(false)} className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-surface-container-high transition-colors">
+                      <button onClick={() => { setShowAddModal(false); setAssignedUserId(''); }} className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-surface-container-high transition-colors">
                         <X size={18} className="text-on-surface-variant" />
                       </button>
                     </div>
                     <div className="p-6 space-y-4">
+                      {/* ADMIN: user selector to assign signature to a specific SIGNER */}
+                      {user?.role === 'ADMIN' && (
+                        <div>
+                          <label className="label flex items-center gap-2">
+                            <UserCheck size={16} />
+                            Asignar a usuario firmante
+                          </label>
+                          <select
+                            className="input"
+                            value={assignedUserId}
+                            onChange={e => setAssignedUserId(e.target.value)}
+                          >
+                            <option value="">—— Sin asignación específica ——</option>
+                            {signerUsers.map(su => (
+                              <option key={su.id} value={su.id}>
+                                {su.first_name} {su.last_name} ({su.email})
+                              </option>
+                            ))}
+                          </select>
+                          <p className="text-xs text-on-surface-variant/60 mt-1.5">
+                            {assignedUserId
+                              ? 'El firmante podrá ver y usar esta firma en sus certificados.'
+                              : 'Solo el administrador podrá usar esta firma.'}
+                          </p>
+                        </div>
+                      )}
                       <div>
                         <label className="label">Nombre Completo *</label>
                         <input className="input" value={newSignatory.full_name}
@@ -811,7 +1004,7 @@ export function SettingsPage() {
                       </div>
                     </div>
                     <div className="flex justify-end gap-3 border-t border-outline-variant/10 px-6 py-4">
-                      <button onClick={() => setShowAddModal(false)} className="btn-secondary btn-sm">Cancelar</button>
+                      <button onClick={() => { setShowAddModal(false); setAssignedUserId(''); }} className="btn-secondary btn-sm">Cancelar</button>
                       <button onClick={handleAddSignatory} className="btn-primary btn-sm">
                         <Plus size={16} /> Crear Firmante
                       </button>
@@ -953,7 +1146,7 @@ export function SettingsPage() {
         </div>
       </div>
 
-      {/* Stats preview */}
+      {/* Stats preview — datos reales */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <div className="glass-card p-5 rounded-xl flex items-center gap-4 border border-white/40">
           <div className="w-12 h-12 bg-primary/10 rounded-full flex items-center justify-center text-primary">
@@ -961,7 +1154,13 @@ export function SettingsPage() {
           </div>
           <div>
             <p className="text-xs font-bold text-on-surface-variant uppercase tracking-widest">Total Firmados</p>
-            <p className="text-2xl font-bold">1,248</p>
+            <p className="text-2xl font-bold">
+              {statsLoading ? (
+                <span className="w-8 h-6 inline-block bg-surface-container-high rounded animate-pulse" />
+              ) : (
+                stats.totalSigned.toLocaleString('es-CO')
+              )}
+            </p>
           </div>
         </div>
         <div className="glass-card p-5 rounded-xl flex items-center gap-4 border border-white/40">
@@ -969,8 +1168,14 @@ export function SettingsPage() {
             <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
           </div>
           <div>
-            <p className="text-xs font-bold text-on-surface-variant uppercase tracking-widest">Pendientes Sinc</p>
-            <p className="text-2xl font-bold">14</p>
+            <p className="text-xs font-bold text-on-surface-variant uppercase tracking-widest">Pendientes</p>
+            <p className="text-2xl font-bold">
+              {statsLoading ? (
+                <span className="w-8 h-6 inline-block bg-surface-container-high rounded animate-pulse" />
+              ) : (
+                stats.pending.toLocaleString('es-CO')
+              )}
+            </p>
           </div>
         </div>
         <div className="glass-card p-5 rounded-xl flex items-center gap-4 border border-white/40">
@@ -978,8 +1183,14 @@ export function SettingsPage() {
             <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" /></svg>
           </div>
           <div>
-            <p className="text-xs font-bold text-on-surface-variant uppercase tracking-widest">Nivel de Confianza</p>
-            <p className="text-2xl font-bold">Tier 3</p>
+            <p className="text-xs font-bold text-on-surface-variant uppercase tracking-widest">Certificados Digitales</p>
+            <p className="text-2xl font-bold">
+              {statsLoading ? (
+                <span className="w-8 h-6 inline-block bg-surface-container-high rounded animate-pulse" />
+              ) : (
+                stats.p12Certificates.toLocaleString('es-CO')
+              )}
+            </p>
           </div>
         </div>
       </div>
