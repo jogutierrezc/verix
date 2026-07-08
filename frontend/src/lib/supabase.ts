@@ -39,6 +39,8 @@ export const STORAGE = {
     CERTIFICATES: (id?: string) => id ? `certificates/${id}` : 'certificates',
     /** Certificados P12/PFX por usuario: p12-certificates/{userId}/{file} */
     P12_CERTIFICATES: (userId: string) => `p12-certificates/${userId}`,
+    /** Logos institucionales: institution-logos/{instId}/{file} */
+    INSTITUTION_LOGOS: (instId: string) => `institution-logos/${instId}`,
   },
   /** Límite: 50MB */
   MAX_FILE_SIZE: 50 * 1024 * 1024,

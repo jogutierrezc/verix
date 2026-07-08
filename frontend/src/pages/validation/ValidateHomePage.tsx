@@ -16,8 +16,11 @@ export function ValidateHomePage() {
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-50 to-green-50 flex items-center justify-center p-4">
       <div className="w-full max-w-lg">
-        {/* Header */}
+        {/* Header with logo */}
         <div className="text-center mb-8">
+          <div className="flex justify-center mb-4">
+            <img src="/Logo%20Verix.png" alt="VERIX" className="h-12 w-auto" />
+          </div>
           <div className="inline-flex items-center gap-2 px-4 py-2 bg-white/80 backdrop-blur rounded-full shadow-sm border border-green-200 mb-4">
             <Shield size={16} className="text-green-600" />
             <span className="text-sm font-semibold text-green-800">VERIX · Validación de Documentos</span>

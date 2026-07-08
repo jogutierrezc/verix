@@ -1,8 +1,11 @@
 import { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { supabase } from '../../lib/supabase';import { Plus, Search, Building2, Trash2, Edit3, ChevronDown, ChevronRight,
-  Layers, Users, UserCheck, UserPlus, X, Save, Hash
+import { supabase, STORAGE } from '../../lib/supabase';
+import { Plus, Search, Building2, Trash2, Edit3, ChevronDown, ChevronRight,
+  Layers, Users, UserCheck, UserPlus, X, Save, Hash,
+  Upload, Image as ImageIcon, Loader2
 } from 'lucide-react';
+import { institutionsApi } from '../../services/api';
 import toast from 'react-hot-toast';
 import { SkeletonCard } from '../../components/ui/SkeletonCard';
 
@@ -46,8 +49,11 @@ export function InstitutionsPage() {
   // Institution modal
   const [showInstModal, setShowInstModal] = useState(false);
   const [editInstId, setEditInstId] = useState<string | null>(null);
-  const [instForm, setInstForm] = useState({ name: '', short_name: '', code: '' });
+  const [instForm, setInstForm] = useState({ name: '', short_name: '', code: '', logo_url: '' as string | null });
   const [savingInst, setSavingInst] = useState(false);
+  const [logoFile, setLogoFile] = useState<File | null>(null);
+  const [logoPreview, setLogoPreview] = useState<string | null>(null);
+  const [uploadingLogo, setUploadingLogo] = useState(false);
 
   // Dependency modal
   const [showDepModal, setShowDepModal] = useState(false);
@@ -167,14 +173,46 @@ export function InstitutionsPage() {
   // --- Institution CRUD ---
   const openCreateInst = () => {
     setEditInstId(null);
-    setInstForm({ name: '', short_name: '', code: '' });
+    setInstForm({ name: '', short_name: '', code: '', logo_url: null });
+    setLogoFile(null);
+    setLogoPreview(null);
     setShowInstModal(true);
   };
 
   const openEditInst = (inst: Institution) => {
     setEditInstId(inst.id);
-    setInstForm({ name: inst.name, short_name: inst.short_name || '', code: inst.code });
+    setInstForm({ name: inst.name, short_name: inst.short_name || '', code: inst.code, logo_url: inst.logo_url });
+    setLogoPreview(inst.logo_url);
+    setLogoFile(null);
     setShowInstModal(true);
+  };
+
+  const handleLogoSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    // Validate file type
+    if (!['image/png', 'image/jpeg', 'image/svg+xml', 'image/webp'].includes(file.type)) {
+      toast.error('Solo se permiten imágenes PNG, JPG, SVG o WEBP');
+      return;
+    }
+    // Validate file size (max 5MB)
+    if (file.size > 5 * 1024 * 1024) {
+      toast.error('La imagen no debe superar los 5MB');
+      return;
+    }
+    setLogoFile(file);
+    // Show local preview immediately
+    const localUrl = URL.createObjectURL(file);
+    setLogoPreview(localUrl);
+  };
+
+  const handleRemoveLogo = () => {
+    if (logoPreview?.startsWith('blob:')) {
+      URL.revokeObjectURL(logoPreview);
+    }
+    setLogoFile(null);
+    setLogoPreview(null);
+    setInstForm(prev => ({ ...prev, logo_url: null }));
   };
 
   const handleSaveInst = async () => {
@@ -184,12 +222,33 @@ export function InstitutionsPage() {
     }
     setSavingInst(true);
     try {
+      let logoUrl = instForm.logo_url;
+
+      // Upload new logo to storage (without updating the record yet)
+      if (logoFile) {
+        setUploadingLogo(true);
+        const instId = editInstId || 'temp';
+        const path = `${STORAGE.PATHS.INSTITUTION_LOGOS(instId)}/${Date.now()}-${logoFile.name}`;
+        const { error: uploadError } = await supabase.storage.from(STORAGE.BUCKET).upload(path, logoFile);
+        if (uploadError) throw uploadError;
+        const { data: { publicUrl } } = supabase.storage.from(STORAGE.BUCKET).getPublicUrl(path);
+        logoUrl = publicUrl;
+        setUploadingLogo(false);
+      }
+
+      const payload = {
+        name: instForm.name,
+        short_name: instForm.short_name,
+        code: instForm.code,
+        logo_url: logoUrl,
+      };
+
       if (editInstId) {
-        const { error } = await supabase.from('institutions').update(instForm).eq('id', editInstId);
+        const { error } = await supabase.from('institutions').update(payload).eq('id', editInstId);
         if (error) throw error;
         toast.success('Institución actualizada');
       } else {
-        const { error } = await supabase.from('institutions').insert(instForm);
+        const { data: newInst, error } = await supabase.from('institutions').insert(payload).select().single();
         if (error) throw error;
         toast.success('Institución creada');
       }
@@ -199,6 +258,7 @@ export function InstitutionsPage() {
       toast.error(err.message);
     } finally {
       setSavingInst(false);
+      setUploadingLogo(false);
     }
   };
 
@@ -341,7 +401,7 @@ export function InstitutionsPage() {
             <div key={inst.id} className="glass-card rounded-2xl overflow-hidden border border-white/40 transition-all">
               {/* Institution header */}
               <div
-                className="p-5 flex items-center justify-between cursor-pointer hover:bg-primary/[0.02] transition-colors"
+                className="p-5 flex items-center justify-between cursor-pointer hover:bg-primary/[0.02] transition-colors group"
                 onClick={() => toggleInstitution(inst.id)}
               >
                 <div className="flex items-center gap-4">
@@ -559,6 +619,44 @@ export function InstitutionsPage() {
                 <input className="input" value={instForm.code}
                   onChange={e => setInstForm({...instForm, code: e.target.value})}
                   placeholder="Ej: UABC-001" />
+              </div>
+
+              {/* Logo upload */}
+              <div>
+                <label className="label">Logotipo</label>
+                <div className="mt-1">
+                  {logoPreview ? (
+                    <div className="relative inline-block">
+                      <img
+                        src={logoPreview}
+                        alt="Logo vista previa"
+                        className="h-24 w-auto rounded-xl border border-outline-variant/30 bg-white object-contain p-2"
+                      />
+                      <button
+                        type="button"
+                        onClick={handleRemoveLogo}
+                        className="absolute -top-2 -right-2 w-6 h-6 bg-error text-white rounded-full flex items-center justify-center shadow-lg hover:bg-error/90 transition-colors"
+                        title="Eliminar logo"
+                      >
+                        <X size={12} />
+                      </button>
+                    </div>
+                  ) : (
+                    <label className="flex flex-col items-center justify-center h-24 px-4 border-2 border-dashed border-outline-variant/30 rounded-xl cursor-pointer hover:border-primary/50 hover:bg-primary/5 transition-all group">
+                      <Upload size={20} className="text-on-surface-variant/40 group-hover:text-primary/60 transition-colors mb-1" />
+                      <span className="text-xs text-on-surface-variant/60 group-hover:text-primary/60 transition-colors">
+                        {uploadingLogo ? 'Subiendo...' : 'Haz clic para subir logo'}
+                      </span>
+                      <input
+                        type="file"
+                        accept="image/png,image/jpeg,image/svg+xml,image/webp"
+                        className="hidden"
+                        onChange={handleLogoSelect}
+                        disabled={uploadingLogo}
+                      />
+                    </label>
+                  )}
+                </div>
               </div>
             </div>
             <div className="flex justify-end gap-3 border-t border-outline-variant/10 px-6 py-4">

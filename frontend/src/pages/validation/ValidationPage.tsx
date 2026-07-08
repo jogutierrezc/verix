@@ -78,6 +78,7 @@ export function ValidationPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [pdfLoading, setPdfLoading] = useState(false);
+  const [institutionData, setInstitutionData] = useState<{ name: string; logo_url: string | null } | null>(null);
   const certificateRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -152,6 +153,16 @@ export function ValidationPage() {
         if (tmpl?.config) {
           const cfg = typeof tmpl.config === 'string' ? safeJsonParse(tmpl.config) : tmpl.config;
           setTemplateConfig(cfg);
+        }
+
+        // Load institution data for logo if available
+        if (tmpl?.institution_id) {
+          const { data: inst } = await supabase
+            .from('institutions')
+            .select('name, logo_url')
+            .eq('id', tmpl.institution_id)
+            .single();
+          if (inst) setInstitutionData(inst);
         }
       }
     } catch (err: any) {
@@ -316,8 +327,22 @@ export function ValidationPage() {
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-50 to-green-50 flex items-center justify-center p-4">
       <div className="w-full max-w-2xl">
-        {/* Header */}
+        {/* Header with logos */}
         <div className="text-center mb-8">
+          <div className="flex items-center justify-center gap-4 mb-4">
+            <img src="/Logo%20Verix.png" alt="VERIX" className="h-10 w-auto" />
+            {institutionData?.logo_url && (
+              <>
+                <span className="text-gray-300 text-xl font-light">+</span>
+                <img
+                  src={institutionData.logo_url}
+                  alt={institutionData.name || 'Logo institución'}
+                  className="h-10 w-auto rounded"
+                  onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                />
+              </>
+            )}
+          </div>
           <div className="inline-flex items-center gap-2 px-4 py-2 bg-white/80 backdrop-blur rounded-full shadow-sm border border-green-200 mb-4">
             <Shield size={16} className="text-green-600" />
             <span className="text-sm font-semibold text-green-800">VERIX · Validación de Documentos</span>
