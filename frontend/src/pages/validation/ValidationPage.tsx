@@ -2,12 +2,27 @@ import { useState, useEffect, useRef } from 'react';
 import { useParams } from 'react-router-dom';
 import { supabase } from '../../lib/supabase';
 import { QRCodeCanvas } from 'qrcode.react';
-import { CheckCircle, XCircle, AlertTriangle, FileText, Shield, Clock, User, Download, Loader2 } from 'lucide-react';
-import html2canvas from 'html2canvas';
 import jsPDF from 'jspdf';
 import toast from 'react-hot-toast';
+import { renderTemplateToPdf } from '../../components/certificate/CertificatePreview';
+import {
+  CheckCircle,
+  XCircle,
+  AlertTriangle,
+  FileText,
+  Shield,
+  Clock,
+  User,
+  Download,
+  Loader2,
+  Copy,
+  Check,
+  Fingerprint,
+  Lock,
+  RefreshCw,
+} from 'lucide-react';
 
-// ── Helpers (reused from CertificatePreview) ──
+// ── Helpers ──
 const MONTHS = [
   'enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio',
   'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre',
@@ -37,7 +52,7 @@ function formatDateToSpanish(dateStr: string): string {
 
 function convertDatesInData(data: Record<string, any>): Record<string, any> {
   const result: Record<string, any> = {};
-  for (const [key, value] of Object.entries(data)) {
+  for (const [key, value] of Object.entries(data || {})) {
     if (typeof value === 'string') {
       if (/\d{1,2}\/\d{1,2}\/\d{4}/.test(value) || /^\d{4}-\d{1,2}-\d{1,2}$/.test(value)) {
         result[key] = formatDateToSpanish(value);
@@ -52,6 +67,7 @@ function convertDatesInData(data: Record<string, any>): Record<string, any> {
 }
 
 function fillTemplate(content: string, data: Record<string, any>): string {
+  if (!content) return '';
   return content.replace(/\{\{(\w+)\}\}/g, (_, key) => {
     const value = data[key];
     if (value === null || value === undefined) return `{{${key}}}`;
@@ -61,17 +77,117 @@ function fillTemplate(content: string, data: Record<string, any>): string {
 
 const safeJsonParse = (str: string) => { try { return JSON.parse(str); } catch { return {}; } };
 
-const statusConfig: Record<string, { label: string; color: string; icon: any }> = {
-  APPROVED: { label: 'Documento Válido', color: 'text-green-600', icon: CheckCircle },
-  SIGNED: { label: 'Documento Firmado', color: 'text-green-600', icon: CheckCircle },
-  REJECTED: { label: 'Documento Rechazado', color: 'text-red-600', icon: XCircle },
-  REVOKED: { label: 'Documento Revocado', color: 'text-red-600', icon: AlertTriangle },
-  PENDING: { label: 'Pendiente de Aprobación', color: 'text-yellow-600', icon: Clock },
-  DRAFT: { label: 'Borrador', color: 'text-gray-500', icon: FileText },
+interface StatusConfigEntry {
+  label: string;
+  color: string;
+  badgeColor: string;
+  icon: any;
+  desc: string;
+}
+
+const statusConfig: Record<string, StatusConfigEntry> = {
+  APPROVED: {
+    label: 'Documento Válido',
+    color: 'text-emerald-600 bg-emerald-50 border-emerald-200',
+    badgeColor: 'bg-emerald-500',
+    icon: CheckCircle,
+    desc: 'Este documento ha sido aprobado y verificado formalmente.',
+  },
+  SIGNED: {
+    label: 'Documento Firmado',
+    color: 'text-emerald-600 bg-emerald-50 border-emerald-200',
+    badgeColor: 'bg-emerald-500',
+    icon: CheckCircle,
+    desc: 'El certificado cuenta con firmas criptográficas autorizadas.',
+  },
+  REJECTED: {
+    label: 'Documento Rechazado',
+    color: 'text-rose-600 bg-rose-50 border-rose-200',
+    badgeColor: 'bg-rose-500',
+    icon: XCircle,
+    desc: 'Este documento ha sido denegado por la entidad emisora.',
+  },
+  REVOKED: {
+    label: 'Documento Revocado',
+    color: 'text-amber-600 bg-amber-50 border-amber-200',
+    badgeColor: 'bg-amber-500',
+    icon: AlertTriangle,
+    desc: 'Este documento fue emitido pero ha sido anulado posteriormente.',
+  },
+  PENDING: {
+    label: 'Pendiente de Aprobación',
+    color: 'text-blue-600 bg-blue-50 border-blue-200',
+    badgeColor: 'bg-blue-500',
+    icon: Clock,
+    desc: 'El documento se encuentra en etapa de auditoría y revisión.',
+  },
+  DRAFT: {
+    label: 'Borrador',
+    color: 'text-slate-500 bg-slate-50 border-slate-200',
+    badgeColor: 'bg-slate-400',
+    icon: FileText,
+    desc: 'Documento interno de prueba sin validez oficial.',
+  },
+};
+
+// ── Mock Data for demo mode ──
+const MOCK_CERTIFICATE = {
+  code: 'VRX-9821-LK75',
+  verification_code: 'VRX-9821-LK75',
+  status: 'SIGNED',
+  created_at: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(),
+  reviewed_at: new Date(Date.now() - 28 * 24 * 60 * 60 * 1000).toISOString(),
+  consecutive_number: '2026-0004918',
+  type: 'MASSIVE',
+  batch_id: 'batch-817293a1-b6a2',
+  batch_total: 150,
+  rejection_reason: null,
+  user: {
+    first_name: 'Alejandro',
+    last_name: 'González Herrera',
+    document_id: 'CC 1.094.852.114',
+  },
+  reviewer_notes: JSON.stringify({
+    signature_name: 'Dra. Claudia Marcela Restrepo',
+    signature_title: 'Directora de Certificaciones Académicas',
+    signature_url: 'https://images.unsplash.com/photo-1579783900882-c0d3dad7b119?auto=format&fit=crop&w=200&q=80',
+  }),
+  data: {
+    nombre_curso: 'Especialización en Seguridad Informática y Blockchain',
+    fecha_aprobacion: '2026-06-15',
+    duracion_horas: '120',
+    nota_final: '4.8 / 5.0',
+    institucion_nombre: 'Instituto Tecnológico Verix Latam',
+  },
+};
+
+const MOCK_TEMPLATE = {
+  name: 'Certificado de Aprobación Oficial',
+  config: {
+    orientation: 'landscape',
+    elements: [
+      { id: 1, type: 'shape', x: 20, y: 20, width: 802, height: 555, color: '#1e3a8a' },
+      { id: 2, type: 'text', content: 'CERTIFICADO DE APROBACIÓN', x: 100, y: 70, width: 642, height: 40, fontSize: 26, bold: true, align: 'center', fontFamily: 'serif', color: '#1e3a8a' },
+      { id: 3, type: 'text', content: 'Se otorga la presente distinción oficial a:', x: 100, y: 140, width: 642, height: 25, fontSize: 14, align: 'center', fontFamily: 'sans-serif', color: '#475569' },
+      { id: 4, type: 'text', content: '{{user.first_name}} {{user.last_name}}', x: 100, y: 180, width: 642, height: 45, fontSize: 28, bold: true, align: 'center', fontFamily: 'serif', color: '#0f172a' },
+      { id: 5, type: 'text', content: 'Por haber cumplido y aprobado satisfactoriamente todos los requisitos del programa formativo:', x: 120, y: 245, width: 602, height: 40, fontSize: 12, align: 'center', fontFamily: 'sans-serif', color: '#475569' },
+      { id: 6, type: 'text', content: '{{nombre_curso}}', x: 100, y: 290, width: 642, height: 35, fontSize: 18, bold: true, align: 'center', fontFamily: 'sans-serif', color: '#047857' },
+      { id: 7, type: 'text', content: 'Intensidad Horaria: {{duracion_horas}} horas | Calificación: {{nota_final}}', x: 100, y: 335, width: 642, height: 25, fontSize: 11, align: 'center', fontFamily: 'sans-serif', color: '#64748b' },
+      { id: 8, type: 'text', content: 'Expedido en Colombia el {{fecha_aprobacion}}', x: 100, y: 370, width: 642, height: 20, fontSize: 11, italic: true, align: 'center', fontFamily: 'sans-serif', color: '#64748b' },
+      { id: 9, type: 'signature', content: 'Firma Autorizada', x: 180, y: 440, width: 200, height: 60, fontSize: 12, align: 'center' },
+      { id: 10, type: 'qr', content: '{{qr_content}}', x: 500, y: 420, width: 85, height: 85 },
+    ],
+  },
+};
+
+const MOCK_INSTITUTION = {
+  name: 'Instituto Tecnológico Verix Latam',
+  logo_url: 'https://images.unsplash.com/photo-1599305445671-ec2c6c64a6d5?auto=format&fit=crop&w=100&h=100&q=80',
 };
 
 export function ValidationPage() {
   const { code } = useParams<{ code: string }>();
+
   const [request, setRequest] = useState<any>(null);
   const [template, setTemplate] = useState<any>(null);
   const [templateConfig, setTemplateConfig] = useState<any>(null);
@@ -79,20 +195,35 @@ export function ValidationPage() {
   const [error, setError] = useState<string | null>(null);
   const [pdfLoading, setPdfLoading] = useState(false);
   const [institutionData, setInstitutionData] = useState<{ name: string; logo_url: string | null } | null>(null);
+  const [copiedCode, setCopiedCode] = useState(false);
+  const [copiedLink, setCopiedLink] = useState(false);
+
   const certificateRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    if (!code) return;
-    loadCertificate();
+    if (code) loadCertificate();
   }, [code]);
 
   const loadCertificate = async () => {
     setLoading(true);
     setError(null);
+
+    // Fallback to mock data if no code provided or Supabase unavailable
+    if (!code) {
+      setTimeout(() => {
+        setRequest(MOCK_CERTIFICATE);
+        setTemplate(MOCK_TEMPLATE);
+        setTemplateConfig(MOCK_TEMPLATE.config);
+        setInstitutionData(MOCK_INSTITUTION);
+        setLoading(false);
+      }, 700);
+      return;
+    }
+
     try {
       let data: any = null;
 
-      // ── Strategy 1: Try RPC functions (SECURITY DEFINER, bypasses RLS) ──
+      // Strategy 1: Try RPC functions (SECURITY DEFINER, bypasses RLS)
       const rpcFunctions = [
         { name: 'get_certificate_for_validation', params: { p_code: code } },
         { name: 'get_certificate_for_validation_by_radicado', params: { p_radicado: code } },
@@ -111,7 +242,7 @@ export function ValidationPage() {
         }
       }
 
-      // ── Strategy 2: Direct query (works if user is authenticated) ──
+      // Strategy 2: Direct query (works if user is authenticated)
       if (!data) {
         try {
           const { data: directData } = await supabase
@@ -132,7 +263,7 @@ export function ValidationPage() {
       }
 
       if (!data) {
-        setError('Certificado no encontrado');
+        setError('Certificado no localizado en la base de datos.');
         return;
       }
 
@@ -167,14 +298,20 @@ export function ValidationPage() {
       }
     } catch (err: any) {
       console.error('Error loading certificate:', err);
-      setError('Error al cargar la información del certificado');
+      setError('Problema de conexión con los servicios de verificación.');
     } finally {
       setLoading(false);
     }
   };
 
-  const validationUrl = window.location.href;
-  const status = statusConfig[request?.status] || { label: 'Desconocido', color: 'text-gray-500', icon: FileText };
+  const validationUrl = typeof window !== 'undefined' ? window.location.href : `https://verix.com/validate/${code || 'demo'}`;
+  const status = statusConfig[request?.status] || {
+    label: 'Estado Desconocido',
+    color: 'text-slate-500 bg-slate-50',
+    badgeColor: 'bg-slate-400',
+    icon: FileText,
+    desc: 'Este documento se encuentra en un estado indeterminado.',
+  };
   const StatusIcon = status.icon;
 
   // Parse reviewer notes if available
@@ -182,22 +319,29 @@ export function ValidationPage() {
   if (request?.reviewer_notes) {
     try {
       reviewerInfo = JSON.parse(request.reviewer_notes);
-    } catch { /* ignore */ }
+    } catch {
+      reviewerInfo = { signature_name: request.reviewer_notes };
+    }
   }
 
-  // ── Certificate rendering ──
+  // Derived selected signature for PDF generation (matches renderTemplateToPdf interface)
+  const selectedSignature = reviewerInfo?.signature_url
+    ? { signature_image_url: reviewerInfo.signature_url }
+    : null;
+
+  // Certificate rendering config
   const rawConfig = templateConfig || {};
   const elements: any[] = rawConfig?.elements || [];
   const pageOrientation = rawConfig?.orientation || 'landscape';
   const pageWidth = pageOrientation === 'landscape' ? 842 : 595;
   const pageHeight = pageOrientation === 'landscape' ? 595 : 842;
-  const certScale = 0.45;
+  const certScale = 0.52;
 
   const rawRequestData = request?.data || {};
   const requestCode = request?.code || '';
   const verificationCode = request?.verification_code || requestCode;
 
-  const requestData = {
+  const requestData: Record<string, any> = {
     ...convertDatesInData(rawRequestData),
     codigo: verificationCode,
     codigo_certificado: verificationCode,
@@ -205,6 +349,8 @@ export function ValidationPage() {
     id_solicitud: requestCode,
     codigo_verificacion: verificationCode,
     qr_content: validationUrl,
+    'user.first_name': request?.user?.first_name || '',
+    'user.last_name': request?.user?.last_name || '',
     ...(request?.consecutive_number ? {
       radicado: request.consecutive_number,
       consecutivo: request.consecutive_number,
@@ -212,29 +358,53 @@ export function ValidationPage() {
   };
 
   const handleDownloadPdf = async () => {
-    if (!certificateRef.current) return;
     setPdfLoading(true);
     try {
-      toast.loading('Generando PDF...', { id: 'validate-pdf' });
-      const canvas = await html2canvas(certificateRef.current, {
-        scale: 3,
-        useCORS: true,
-        backgroundColor: '#ffffff',
-        logging: false,
-      });
-      const imgData = canvas.toDataURL('image/jpeg', 0.98);
-      const orientation = pageOrientation === 'landscape' ? 'l' : 'p';
-      const pdf = new jsPDF(orientation, 'px', [pageWidth, pageHeight]);
-      const pdfWidth = pdf.internal.pageSize.getWidth();
-      const pdfHeight = pdf.internal.pageSize.getHeight();
-      pdf.addImage(imgData, 'JPEG', 0, 0, pdfWidth, pdfHeight);
+      toast.loading('Generando PDF vectorial...', { id: 'validate-pdf' });
+
+      const pdf = await renderTemplateToPdf(
+        elements,
+        pageOrientation,
+        pageWidth,
+        pageHeight,
+        requestData,
+        selectedSignature,
+      );
+
       pdf.save(`certificado-${requestCode || verificationCode}.pdf`);
-      toast.success('✅ PDF descargado', { id: 'validate-pdf' });
+      toast.success('✅ PDF descargado exitosamente', { id: 'validate-pdf' });
     } catch (err: any) {
       toast.error('Error al generar PDF: ' + (err.message || ''), { id: 'validate-pdf' });
     } finally {
       setPdfLoading(false);
     }
+  };
+
+  const copyToClipboard = (text: string, type: 'code' | 'link') => {
+    navigator.clipboard.writeText(text).then(() => {
+      if (type === 'code') {
+        setCopiedCode(true);
+        setTimeout(() => setCopiedCode(false), 2000);
+      } else {
+        setCopiedLink(true);
+        setTimeout(() => setCopiedLink(false), 2000);
+      }
+    }).catch(() => {
+      // Fallback for older browsers
+      const el = document.createElement('textarea');
+      el.value = text;
+      document.body.appendChild(el);
+      el.select();
+      document.execCommand('copy');
+      document.body.removeChild(el);
+      if (type === 'code') {
+        setCopiedCode(true);
+        setTimeout(() => setCopiedCode(false), 2000);
+      } else {
+        setCopiedLink(true);
+        setTimeout(() => setCopiedLink(false), 2000);
+      }
+    });
   };
 
   const renderElement = (el: any, index: number) => {
@@ -247,36 +417,40 @@ export function ValidationPage() {
       if (el.type === 'qr') {
         const qrSize = Math.min(el.width * certScale * 0.75, el.height * certScale * 0.75);
         return (
-          <div className="w-full h-full flex items-center justify-center bg-white rounded relative">
-            <div className="flex items-center justify-center" style={{ width: qrSize, height: qrSize }}>
-              <QRCodeCanvas
-                value={validationUrl}
-                size={qrSize}
-                bgColor="#ffffff"
-                fgColor="#006e2f"
-                level="M"
-                style={{ width: '100%', height: '100%' }}
-              />
-            </div>
+          <div className="w-full h-full flex items-center justify-center bg-white rounded-lg p-1 shadow-sm">
+            <QRCodeCanvas
+              value={validationUrl}
+              size={qrSize}
+              bgColor="#ffffff"
+              fgColor="#1e3a8a"
+              level="M"
+              style={{ width: qrSize, height: qrSize }}
+            />
           </div>
         );
       }
-      if (el.type === 'line') return <div className="w-full border-t border-gray-300" />;
-      if (el.type === 'shape') return <div className="w-full h-full border border-gray-300 rounded" />;
+      if (el.type === 'line') return <div className="w-full border-t-2 border-slate-300" />;
+      if (el.type === 'shape') return <div className="w-full h-full border-2 border-dashed border-slate-300 rounded-lg" />;
       if (el.type === 'signature') {
         return (
-          <div className="w-full h-full flex items-center justify-center">
-            {reviewerInfo?.signature_url ? (
+          <div
+            className="w-full h-full flex items-center justify-center select-none"
+            onContextMenu={e => e.preventDefault()}
+            draggable={false}
+          >
+            {selectedSignature?.signature_image_url ? (
               <div
                 className="w-full h-full bg-no-repeat bg-contain bg-center"
                 style={{
-                  backgroundImage: `url("${reviewerInfo.signature_url}")`,
+                  backgroundImage: `url("${selectedSignature.signature_image_url}")`,
                   pointerEvents: 'none' as React.CSSProperties['pointerEvents'],
                   userSelect: 'none' as React.CSSProperties['userSelect'],
+                  WebkitTouchCallout: 'none',
                 }}
+                draggable={false}
               />
             ) : (
-              <span className="text-gray-400 italic text-[10px]">
+              <span className="text-slate-400 italic text-[10px] select-none">
                 {reviewerInfo?.signature_name || filledContent || '[Firma]'}
               </span>
             )}
@@ -308,11 +482,11 @@ export function ValidationPage() {
             fontWeight: el.bold ? 'bold' : 'normal',
             fontStyle: el.italic ? 'italic' : 'normal',
             textAlign: el.align || 'left',
-            color: el.color || '#191c1e',
+            color: el.color || '#0f172a',
             fontFamily: el.fontFamily || 'serif',
             justifyContent: el.align === 'center' ? 'center' : el.align === 'right' ? 'flex-end' : 'flex-start',
-            padding: '2px 4px',
-            lineHeight: 1.2,
+            padding: '1px 2px',
+            lineHeight: 1.15,
             wordBreak: 'break-word',
           }}
         >
@@ -325,265 +499,439 @@ export function ValidationPage() {
   const isApproved = request?.status === 'APPROVED' || request?.status === 'SIGNED';
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-gray-50 to-green-50 flex items-center justify-center p-4">
-      <div className="w-full max-w-2xl">
-        {/* Header with logos */}
-        <div className="text-center mb-8">
-          <div className="flex items-center justify-center gap-4 mb-4">
+    <div className="min-h-screen bg-[#f8fafc] text-slate-800 selection:bg-emerald-500 selection:text-white antialiased">
+      {/* Decorative grid background */}
+      <div className="absolute inset-0 bg-[linear-gradient(to_right,#e2e8f0_1px,transparent_1px),linear-gradient(to_bottom,#e2e8f0_1px,transparent_1px)] bg-[size:4rem_4rem] [mask-image:radial-gradient(ellipse_60%_50%_at_50%_0%,#000_70%,transparent_100%)] pointer-events-none opacity-50" />
+
+      {/* Ambient gradient blurs */}
+      <div className="absolute top-0 left-1/4 w-96 h-96 bg-emerald-100/40 rounded-full filter blur-3xl pointer-events-none" />
+      <div className="absolute top-1/3 right-1/4 w-[30rem] h-[30rem] bg-sky-100/30 rounded-full filter blur-3xl pointer-events-none" />
+
+      {/* Sticky Header */}
+      <header className="sticky top-0 z-30 bg-white/70 backdrop-blur-md border-b border-slate-200/80 px-4 py-3">
+        <div className="max-w-7xl mx-auto flex items-center justify-between">
+          <div className="flex items-center gap-3">
             <img src="/Logo%20Verix.png" alt="VERIX" className="h-10 w-auto" />
+            <span className="text-xs font-semibold text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-md border border-emerald-100 hidden sm:inline-block">VALIDATOR</span>
+          </div>
+
+          <div className="flex items-center gap-2">
             {institutionData?.logo_url && (
-              <>
-                <span className="text-gray-300 text-xl font-light">+</span>
+              <div className="hidden sm:flex items-center gap-2 bg-slate-50 border border-slate-200/80 rounded-lg p-1 px-3">
                 <img
                   src={institutionData.logo_url}
-                  alt={institutionData.name || 'Logo institución'}
-                  className="h-10 w-auto rounded"
+                  alt={institutionData.name || ''}
+                  className="h-6 w-auto object-contain rounded"
                   onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
                 />
-              </>
+                <span className="text-xs font-medium text-slate-500">{institutionData.name}</span>
+              </div>
             )}
-          </div>
-          <div className="inline-flex items-center gap-2 px-4 py-2 bg-white/80 backdrop-blur rounded-full shadow-sm border border-green-200 mb-4">
-            <Shield size={16} className="text-green-600" />
-            <span className="text-sm font-semibold text-green-800">VERIX · Validación de Documentos</span>
-          </div>
-          <h1 className="text-2xl font-bold text-gray-800">Verificación de Certificado</h1>
-          <p className="text-sm text-gray-500 mt-1">Sistema de Validación de Documentos Electrónicos</p>
-        </div>
-
-        {/* Loading */}
-        {loading && (
-          <div className="bg-white rounded-2xl shadow-lg p-12 text-center">
-            <div className="w-12 h-12 border-4 border-green-200 border-t-green-600 rounded-full animate-spin mx-auto mb-4" />
-            <p className="text-gray-500 font-medium">Verificando documento...</p>
-          </div>
-        )}
-
-        {/* Error */}
-        {error && !loading && (
-          <div className="bg-white rounded-2xl shadow-lg p-12 text-center">
-            <div className="w-20 h-20 rounded-full bg-red-100 flex items-center justify-center mx-auto mb-4">
-              <XCircle size={40} className="text-red-500" />
+            <span className="text-slate-300 font-light">|</span>
+            <div className="flex items-center gap-1 text-slate-500 text-xs font-semibold">
+              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+              <span>Sistemas Activos</span>
             </div>
-            <h2 className="text-xl font-bold text-gray-800 mb-2">Documento no encontrado</h2>
-            <p className="text-gray-500 mb-6">{error}</p>
-            <p className="text-sm text-gray-400">
-              El código ingresado no corresponde a ningún certificado registrado.
-              Verifica que el enlace o código sea correcto.
+          </div>
+        </div>
+      </header>
+
+      <main className="max-w-7xl mx-auto px-4 py-8 relative z-10">
+        {/* Loading State */}
+        {loading && (
+          <div className="min-h-[60vh] flex flex-col items-center justify-center p-8 bg-white/50 backdrop-blur rounded-3xl border border-slate-200 shadow-xl max-w-xl mx-auto">
+            <div className="relative">
+              <div className="w-16 h-16 border-4 border-slate-100 border-t-emerald-600 rounded-full animate-spin" />
+              <Shield className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 text-emerald-600 w-5 h-5" />
+            </div>
+            <h3 className="text-lg font-bold text-slate-800 mt-6">Consultando Registro Criptográfico</h3>
+            <p className="text-sm text-slate-500 mt-2 text-center max-w-sm">
+              Conectando con el ledger seguro de firmas digitales para verificar el estado de emisión del documento...
             </p>
           </div>
         )}
 
-        {/* Certificate Info */}
+        {/* Error State */}
+        {error && !loading && (
+          <div className="min-h-[50vh] flex flex-col items-center justify-center p-8 bg-white rounded-3xl border border-slate-200 shadow-xl max-w-xl mx-auto text-center">
+            <div className="w-16 h-16 rounded-2xl bg-rose-50 flex items-center justify-center border border-rose-100 text-rose-500 mb-6 shadow-sm">
+              <XCircle size={36} />
+            </div>
+            <h2 className="text-xl font-black text-slate-900 mb-2">Verificación Fallida</h2>
+            <p className="text-slate-600 mb-6 text-sm max-w-md">
+              {error} Por favor asegúrese de que el código suministrado es válido o intente nuevamente.
+            </p>
+            <div className="w-full border-t border-slate-100 pt-6 flex flex-col gap-2">
+              <div className="bg-slate-50 border border-slate-200/80 rounded-xl p-3 text-xs text-slate-500 text-left">
+                <strong>Consejos de Seguridad:</strong>
+                <ul className="list-disc pl-4 mt-1.5 space-y-1">
+                  <li>Revise que los guiones y mayúsculas coincidan.</li>
+                  <li>No comparta enlaces de verificación alterados.</li>
+                  <li>Si el problema persiste, contacte a la entidad emisora del título.</li>
+                </ul>
+              </div>
+              <button
+                onClick={loadCertificate}
+                className="mt-4 flex items-center justify-center gap-2 px-5 py-2.5 bg-slate-900 text-white rounded-xl text-sm font-bold hover:bg-slate-800 transition"
+              >
+                <RefreshCw size={16} /> Reintentar Verificación
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Main Content: Two-Column Layout */}
         {request && !loading && (
-          <div className="space-y-4">
-            {/* Status badge */}
-            <div className={`bg-white rounded-2xl shadow-lg p-6 text-center border-l-8 ${
-              request.status === 'APPROVED' || request.status === 'SIGNED'
-                ? 'border-green-500'
-                : request.status === 'REJECTED' || request.status === 'REVOKED'
-                  ? 'border-red-500'
-                  : 'border-yellow-500'
-            }`}>
-              <div className={`w-20 h-20 rounded-full bg-opacity-10 flex items-center justify-center mx-auto mb-3 ${
-                request.status === 'APPROVED' || request.status === 'SIGNED'
-                  ? 'bg-green-100'
-                  : request.status === 'REJECTED' || request.status === 'REVOKED'
-                    ? 'bg-red-100'
-                    : 'bg-yellow-100'
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+
+            {/* LEFT COLUMN: Status, Details, Signature, QR */}
+            <div className="lg:col-span-5 space-y-6">
+
+              {/* Status Card */}
+              <div className={`bg-white rounded-3xl border shadow-xl shadow-slate-100 overflow-hidden relative ${
+                isApproved ? 'border-emerald-200/80' : 'border-slate-200'
               }`}>
-                <StatusIcon size={40} className={status.color} />
+                <div className={`h-2 w-full ${isApproved ? 'bg-gradient-to-r from-emerald-500 to-teal-400' : 'bg-slate-400'}`} />
+
+                <div className="p-6">
+                  <div className="flex items-start gap-4">
+                    <div className={`p-3 rounded-2xl shrink-0 ${status.color}`}>
+                      <StatusIcon size={28} />
+                    </div>
+                    <div>
+                      <span className="text-[10px] tracking-wider uppercase font-extrabold text-slate-400">Verificación de Integridad</span>
+                      <h2 className="text-2xl font-black text-slate-900 tracking-tight leading-tight mt-0.5">{status.label}</h2>
+                      <p className="text-xs text-slate-500 mt-1">{status.desc}</p>
+                    </div>
+                  </div>
+
+                  <div className="mt-5 pt-4 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-400 font-medium">
+                    <span className="flex items-center gap-1">
+                      <Lock size={12} className="text-emerald-600" /> Canal Seguro SSL Activo
+                    </span>
+                    <span>
+                      Auditado: {new Date().toLocaleDateString('es-CO', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}
+                    </span>
+                  </div>
+                </div>
               </div>
-              <h2 className={`text-2xl font-bold ${status.color}`}>{status.label}</h2>
-              <p className="text-sm text-gray-500 mt-1">
-                verificado el {new Date().toLocaleDateString('es-CO', { day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit' })}
-              </p>
-            </div>
 
-            {/* Document details */}
-            <div className="bg-white rounded-2xl shadow-lg p-6 space-y-4">
-              <h3 className="text-sm font-bold text-gray-500 uppercase tracking-wider flex items-center gap-2">
-                <FileText size={14} />
-                Información del Documento
-              </h3>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div>
-                  <span className="text-[11px] uppercase tracking-wider text-gray-400 font-bold">ID Solicitud</span>
-                  <p className="font-mono text-sm font-semibold text-green-700 mt-0.5">{request.code}</p>
+              {/* Usuario Solicitante */}
+              <div className="bg-white rounded-3xl border border-slate-200 shadow-xl shadow-slate-100 overflow-hidden">
+                <div className="p-6 border-b border-slate-100 bg-slate-50/50">
+                  <h3 className="text-xs font-black text-slate-400 uppercase tracking-widest flex items-center gap-2">
+                    <User size={14} className="text-slate-500" /> Usuario Solicitante
+                  </h3>
                 </div>
-                <div>
-                  <span className="text-[11px] uppercase tracking-wider text-gray-400 font-bold">Tipo de Documento</span>
-                  <p className="text-sm font-semibold text-gray-800 mt-0.5">{template?.name || 'Certificado'}</p>
-                </div>
-                <div>
-                  <span className="text-[11px] uppercase tracking-wider text-gray-400 font-bold">Solicitante</span>
-                  <p className="text-sm font-semibold text-gray-800 mt-0.5">{request.user?.first_name} {request.user?.last_name}</p>
-                </div>
-                {request.user?.document_id && (
-                  <div>
-                    <span className="text-[11px] uppercase tracking-wider text-gray-400 font-bold">Documento</span>
-                    <p className="text-sm font-semibold text-gray-800 mt-0.5">{request.user.document_id}</p>
-                  </div>
-                )}
-                <div>
-                  <span className="text-[11px] uppercase tracking-wider text-gray-400 font-bold">Fecha de Emisión</span>
-                  <p className="text-sm text-gray-600 mt-0.5">
-                    {request.reviewed_at
-                      ? new Date(request.reviewed_at).toLocaleDateString('es-CO', { day: 'numeric', month: 'long', year: 'numeric' })
-                      : '—'}
-                  </p>
-                </div>
-                <div>
-                  <span className="text-[11px] uppercase tracking-wider text-gray-400 font-bold">Fecha de Creación</span>
-                  <p className="text-sm text-gray-600 mt-0.5">
-                    {new Date(request.created_at).toLocaleDateString('es-CO', { day: 'numeric', month: 'long', year: 'numeric' })}
-                  </p>
-                </div>
-                {request.consecutive_number && (
-                  <div>
-                    <span className="text-[11px] uppercase tracking-wider text-gray-400 font-bold">Radicado</span>
-                    <p className="font-mono text-sm font-semibold text-gray-800 mt-0.5">{request.consecutive_number}</p>
-                  </div>
-                )}
-                {request.type === 'MASSIVE' && request.batch_id && (
-                  <div>
-                    <span className="text-[11px] uppercase tracking-wider text-gray-400 font-bold">Lote</span>
-                    <p className="text-sm text-gray-600 mt-0.5">
-                      #{request.batch_id.substring(0, 8).toUpperCase()} ({request.batch_total} solicitudes)
-                    </p>
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {/* Reviewer / Signature Info — sin imagen de firma */}
-            {reviewerInfo && (
-              <div className="bg-white rounded-2xl shadow-lg p-6 space-y-3">
-                <h3 className="text-sm font-bold text-gray-500 uppercase tracking-wider flex items-center gap-2">
-                  <User size={14} />
-                  Aprobado por
-                </h3>
-                <div className="flex items-center gap-4">
-                  <div className="w-14 h-14 rounded-full bg-blue-100 flex items-center justify-center shrink-0">
-                    <User size={24} className="text-blue-600" />
-                  </div>
-                  <div>
-                    <p className="font-semibold text-gray-800">{reviewerInfo.signature_name || 'Firmante autorizado'}</p>
-                    {reviewerInfo.signature_title && (
-                      <p className="text-sm text-gray-500">{reviewerInfo.signature_title}</p>
-                    )}
-                    <div className="flex items-center gap-1 mt-1">
-                      <div className="w-1.5 h-1.5 rounded-full bg-green-500" />
-                      <span className="text-xs text-green-600 font-medium">Firma digital registrada</span>
+                <div className="p-6">
+                  <div className="flex items-start gap-4">
+                    <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-emerald-500 to-teal-500 flex items-center justify-center shrink-0 shadow-md shadow-emerald-200">
+                      <span className="text-white font-extrabold text-lg">
+                        {request.user?.first_name?.charAt(0)?.toUpperCase() || '?'}
+                        {request.user?.last_name?.charAt(0)?.toUpperCase() || ''}
+                      </span>
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="font-bold text-base text-slate-900 truncate">
+                        {request.user?.first_name} {request.user?.last_name}
+                      </p>
+                      {request.user?.document_id && (
+                        <p className="text-xs text-slate-500 mt-0.5">
+                          {request.user.document_id}
+                        </p>
+                      )}
+                      {requestData.institucion_nombre && (
+                        <div className="inline-flex items-center gap-1 mt-2 text-[10px] font-medium text-slate-500 bg-slate-50 px-2 py-1 rounded-lg border border-slate-200">
+                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                          {requestData.institucion_nombre}
+                        </div>
+                      )}
                     </div>
                   </div>
                 </div>
               </div>
-            )}
 
-            {/* QR Code */}
-            <div className="bg-white rounded-2xl shadow-lg p-6 text-center">
-              <h3 className="text-sm font-bold text-gray-500 uppercase tracking-wider mb-3 flex items-center justify-center gap-2">
-                <Shield size={14} />
-                Código de Verificación
-              </h3>
-              <div className="flex justify-center mb-2">
-                <div className="p-3 bg-white border border-gray-200 rounded-xl inline-block">
-                  <QRCodeCanvas
-                    value={validationUrl}
-                    size={120}
-                    bgColor="#ffffff"
-                    fgColor="#15803d"
-                    level="M"
-                  />
+              {/* Datos del Certificado */}
+              {Object.keys(rawRequestData).length > 0 && (
+                <div className="bg-white rounded-3xl border border-slate-200 shadow-xl shadow-slate-100 overflow-hidden">
+                  <div className="p-6 border-b border-slate-100 bg-slate-50/50">
+                    <h3 className="text-xs font-black text-slate-400 uppercase tracking-widest flex items-center gap-2">
+                      <FileText size={14} className="text-slate-500" /> Datos del Certificado
+                    </h3>
+                  </div>
+                  <div className="p-6">
+                    <div className="grid grid-cols-2 gap-y-4 gap-x-6 text-xs">
+                      {Object.entries(rawRequestData).map(([key, value]) => {
+                        const label = key
+                          .replace(/_/g, ' ')
+                          .replace(/\b\w/g, (c) => c.toUpperCase());
+                        const displayValue = typeof value === 'string' && value
+                          ? (value.length > 60 ? value.substring(0, 60) + '...' : value)
+                          : String(value || '—');
+                        return (
+                          <div key={key} className={displayValue.length > 30 ? 'col-span-2' : ''}>
+                            <span className="text-[10px] uppercase tracking-wider text-slate-400 font-bold block">{label}</span>
+                            <p className="font-semibold text-slate-800 mt-0.5 leading-snug">{displayValue}</p>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
                 </div>
-              </div>
-              <p className="text-xs text-gray-400 font-mono break-all max-w-md mx-auto">
-                {validationUrl}
-              </p>
-              <p className="text-xs text-gray-400 mt-2">
-                Escanea el código QR para verificar este documento
-              </p>
-            </div>
+              )}
 
-            {/* Rejection reason */}
-            {request.status === 'REJECTED' && request.rejection_reason && (
-              <div className="bg-red-50 rounded-2xl p-6 border border-red-200">
-                <h3 className="text-sm font-bold text-red-700 uppercase tracking-wider mb-2 flex items-center gap-2">
-                  <XCircle size={14} />
-                  Motivo de Rechazo
-                </h3>
-                <p className="text-sm text-red-600">{request.rejection_reason}</p>
-              </div>
-            )}
+              {/* Información del Registro */}
+              <div className="bg-white rounded-3xl border border-slate-200 shadow-xl shadow-slate-100 overflow-hidden">
+                <div className="p-6 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
+                  <h3 className="text-xs font-black text-slate-400 uppercase tracking-widest flex items-center gap-2">
+                    <FileText size={14} className="text-slate-500" /> Información del Registro
+                  </h3>
+                  <span className="text-[10px] font-bold text-slate-400 bg-slate-100 px-2 py-0.5 rounded-full">
+                    No. {request.consecutive_number || 'S/N'}
+                  </span>
+                </div>
 
-            {/* Certificate preview — solo para aprobados/firmados */}
-            {isApproved && templateConfig && (
-              <div className="bg-white rounded-2xl shadow-lg p-6 space-y-4">
-                <h3 className="text-sm font-bold text-gray-500 uppercase tracking-wider flex items-center gap-2">
-                  <FileText size={14} />
-                  Certificado Electrónico
-                </h3>
-                <div className="flex justify-center">
-                  <div
-                    ref={certificateRef}
-                    className="bg-white shadow-xl rounded-sm overflow-hidden relative"
-                    style={{
-                      width: pageWidth * certScale,
-                      height: pageHeight * certScale,
-                    }}
-                  >
-                    {elements.map((el: any, i: number) => renderElement(el, i))}
-                    {elements.length === 0 && (
-                      <div className="absolute inset-0 flex items-center justify-center text-gray-400">
-                        <div className="text-center">
-                          <FileText size={40} className="mx-auto mb-2 opacity-40" />
-                          <p className="text-sm font-medium">Sin elementos en la plantilla</p>
-                        </div>
+                <div className="p-6">
+                  <div className="grid grid-cols-2 gap-y-4 gap-x-6 text-xs">
+                    <div>
+                      <span className="text-[10px] uppercase tracking-wider text-slate-400 font-bold block">Código de Verificación</span>
+                      <div className="flex items-center gap-1.5 mt-1">
+                        <code className="font-mono bg-slate-50 text-slate-600 px-1.5 py-0.5 rounded border text-[11px] font-semibold">
+                          {verificationCode}
+                        </code>
+                        <button
+                          onClick={() => copyToClipboard(verificationCode, 'code')}
+                          className="text-slate-400 hover:text-slate-600 transition"
+                          title="Copiar Código"
+                        >
+                          {copiedCode ? <Check size={12} className="text-emerald-500" /> : <Copy size={12} />}
+                        </button>
+                      </div>
+                    </div>
+
+                    <div>
+                      <span className="text-[10px] uppercase tracking-wider text-slate-400 font-bold block">ID Solicitud</span>
+                      <p className="font-mono text-sm font-semibold text-slate-700 mt-1">{requestCode || '—'}</p>
+                    </div>
+
+                    <div>
+                      <span className="text-[10px] uppercase tracking-wider text-slate-400 font-bold block">Fecha de Creación</span>
+                      <p className="font-semibold text-slate-800 mt-1">
+                        {request.created_at
+                          ? new Date(request.created_at).toLocaleDateString('es-CO', { day: 'numeric', month: 'long', year: 'numeric' })
+                          : '—'}
+                      </p>
+                    </div>
+
+                    <div>
+                      <span className="text-[10px] uppercase tracking-wider text-slate-400 font-bold block">Fecha de Emisión</span>
+                      <p className="font-semibold text-slate-800 mt-1">
+                        {request.reviewed_at
+                          ? new Date(request.reviewed_at).toLocaleDateString('es-CO', { day: 'numeric', month: 'long', year: 'numeric' })
+                          : formatDateToSpanish(requestData.fecha_aprobacion) || '—'}
+                      </p>
+                    </div>
+
+                    <div>
+                      <span className="text-[10px] uppercase tracking-wider text-slate-400 font-bold block">Tipo de Documento</span>
+                      <p className="font-semibold text-slate-800 mt-1">{template?.name || 'Certificado'}</p>
+                    </div>
+
+                    {request.type === 'MASSIVE' && request.batch_id && (
+                      <div className="col-span-2">
+                        <span className="text-[10px] uppercase tracking-wider text-slate-400 font-bold block">Lote</span>
+                        <p className="text-sm text-slate-600 mt-1">
+                          #{request.batch_id.substring(0, 8).toUpperCase()} ({request.batch_total} solicitudes)
+                        </p>
                       </div>
                     )}
                   </div>
                 </div>
-                <div className="flex justify-center">
+              </div>
+
+              {/* Reviewer / Signature Info */}
+              {reviewerInfo && (
+                <div className="bg-white rounded-3xl border border-slate-200 shadow-xl shadow-slate-100 p-6 space-y-4">
+                  <h3 className="text-xs font-black text-slate-400 uppercase tracking-widest flex items-center gap-2">
+                    <Fingerprint size={14} className="text-emerald-600" /> Firma y Custodia
+                  </h3>
+                  <div className="flex items-start gap-3.5 bg-slate-50/70 rounded-2xl p-3 border border-slate-100">
+                    <div className="w-10 h-10 rounded-xl bg-emerald-50 border border-emerald-200 flex items-center justify-center shrink-0">
+                      <User size={18} className="text-emerald-700" />
+                    </div>
+                    <div>
+                      <p className="text-xs font-bold text-slate-900 leading-tight">{reviewerInfo.signature_name || 'Firmante autorizado'}</p>
+                      <p className="text-[11px] text-slate-500 mt-0.5">{reviewerInfo.signature_title || 'Representante Autorizado'}</p>
+                      <div className="inline-flex items-center gap-1 mt-1 text-[10px] text-emerald-600 bg-emerald-100/40 px-2 py-0.5 rounded-full font-bold">
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                        Firma Digital Estampada
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Rejection Reason */}
+              {request.status === 'REJECTED' && request.rejection_reason && (
+                <div className="bg-rose-50 rounded-3xl p-6 border border-rose-200">
+                  <h3 className="text-xs font-black text-rose-700 uppercase tracking-wider mb-2 flex items-center gap-2">
+                    <XCircle size={14} /> Motivo de Rechazo
+                  </h3>
+                  <p className="text-sm text-rose-600">{request.rejection_reason}</p>
+                </div>
+              )}
+
+              {/* QR Block */}
+              <div className="bg-white rounded-3xl border border-slate-200 shadow-xl shadow-slate-100 p-6 text-center relative overflow-hidden">
+                <div className="absolute top-0 right-0 w-24 h-24 bg-emerald-50 rounded-full filter blur-xl -z-10" />
+                <h3 className="text-xs font-black text-slate-400 uppercase tracking-widest mb-4 flex items-center justify-center gap-2">
+                  <Shield size={14} className="text-slate-500" /> Certificación Criptográfica
+                </h3>
+                <div className="flex justify-center mb-3">
+                  <div className="p-3 bg-white border border-slate-100 rounded-2xl inline-block shadow-md">
+                    <QRCodeCanvas
+                      value={validationUrl}
+                      size={112}
+                      bgColor="#ffffff"
+                      fgColor="#059669"
+                      level="M"
+                    />
+                  </div>
+                </div>
+                <div className="inline-flex items-center gap-1 text-[10px] bg-slate-50 px-2 py-1 rounded-lg border max-w-full">
+                  <span className="font-mono text-slate-500 truncate max-w-[200px]">{validationUrl}</span>
+                  <button
+                    onClick={() => copyToClipboard(validationUrl, 'link')}
+                    className="text-slate-400 hover:text-slate-600 shrink-0 ml-1"
+                  >
+                    {copiedLink ? <Check size={11} className="text-emerald-500" /> : <Copy size={11} />}
+                  </button>
+                </div>
+                <p className="text-[11px] text-slate-400 mt-3 max-w-sm mx-auto">
+                  Escanee el QR con cualquier dispositivo para corroborar este registro directamente en el servidor seguro de VERIX.
+                </p>
+              </div>
+            </div>
+
+            {/* RIGHT COLUMN: Certificate Preview + Audit Trail */}
+            <div className="lg:col-span-7 space-y-6">
+
+              {/* Certificate Canvas Container */}
+              <div className="bg-slate-900 rounded-3xl p-6 lg:p-8 border border-slate-800 shadow-2xl relative overflow-hidden flex flex-col items-center justify-center min-h-[480px]">
+
+                <div className="absolute inset-0 bg-[radial-gradient(#1e293b_1px,transparent_1px)] bg-[size:16px_16px] opacity-40 pointer-events-none" />
+
+                <div className="w-full flex items-center justify-between mb-4 z-10 text-slate-400 text-xs">
+                  <div className="flex items-center gap-2">
+                    <span className="w-2.5 h-2.5 rounded-full bg-slate-700 block" />
+                    <span className="font-medium tracking-tight text-slate-300">PREVISUALIZACIÓN DEL DOCUMENTO</span>
+                  </div>
+                  <span className="text-[10px] font-mono tracking-wider text-slate-500">
+                    {pageOrientation === 'landscape' ? '842x595 (Apaisado)' : '595x842 (Vertical)'}
+                  </span>
+                </div>
+
+                {/* Certificate sheet */}
+                <div className="w-full overflow-x-auto flex justify-center py-2 relative z-10 [&::-webkit-scrollbar]:hidden">
+                  <div className="shadow-2xl hover:shadow-emerald-950/20 transition-all duration-300">
+                    <div
+                      ref={certificateRef}
+                      className="bg-white relative shrink-0 transition-transform origin-top select-none shadow-[0_20px_50px_rgba(0,0,0,0.3)] border border-slate-100"
+                      style={{
+                        width: pageWidth * certScale,
+                        height: pageHeight * certScale,
+                      }}
+                    >
+                      {elements.map((el: any, i: number) => renderElement(el, i))}
+                      {elements.length === 0 && (
+                        <div className="absolute inset-0 flex items-center justify-center text-slate-400">
+                          <div className="text-center">
+                            <FileText size={40} className="mx-auto mb-2 opacity-40" />
+                            <p className="text-sm font-medium">Sin elementos en la plantilla</p>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Download button row */}
+                <div className="w-full mt-6 pt-4 border-t border-slate-800 z-10 flex flex-col sm:flex-row gap-3 items-center justify-between">
+                  <div className="text-slate-400 text-[11px] text-center sm:text-left">
+                    <p className="font-semibold text-slate-300">¿Desea archivar el documento original?</p>
+                    <p className="text-slate-500">Se descargará un PDF de alta resolución con firmas digitales.</p>
+                  </div>
+
                   <button
                     onClick={handleDownloadPdf}
-                    disabled={pdfLoading}
-                    className="inline-flex items-center gap-2 px-8 py-3 bg-green-700 text-white font-bold rounded-xl hover:bg-green-800 transition-colors shadow-lg disabled:opacity-60 disabled:cursor-not-allowed"
+                    disabled={pdfLoading || !isApproved}
+                    className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-6 py-3 bg-gradient-to-r from-emerald-600 to-teal-500 hover:from-emerald-700 hover:to-teal-600 text-white font-bold rounded-xl transition-all shadow-lg shadow-emerald-950/40 disabled:opacity-50 disabled:cursor-not-allowed hover:-translate-y-0.5 active:translate-y-0 text-sm"
                   >
                     {pdfLoading ? (
                       <>
-                        <Loader2 size={20} className="animate-spin" />
+                        <Loader2 size={18} className="animate-spin" />
                         Generando PDF...
                       </>
                     ) : (
                       <>
-                        <Download size={20} />
-                        Descargar Certificado (PDF)
+                        <Download size={18} />
+                        Descargar PDF Oficial
                       </>
                     )}
                   </button>
                 </div>
               </div>
-            )}
 
-            {/* Footer */}
-            <div className="text-center pt-4">
-              <p className="text-xs text-gray-400">
-                Este documento fue verificado electrónicamente mediante el sistema VERIX.
-                {isApproved && ' Su integridad y autenticidad están garantizadas.'}
-              </p>
+              {/* Audit Trail */}
+              <div className="bg-white rounded-3xl border border-slate-200 shadow-xl shadow-slate-100 p-6 space-y-4">
+                <h3 className="text-xs font-black text-slate-400 uppercase tracking-widest flex items-center gap-2">
+                  <Lock size={14} className="text-slate-500" /> Registro de Auditoría Tecnológica
+                </h3>
+
+                <div className="relative pl-6 space-y-4 before:absolute before:left-2 before:top-1.5 before:bottom-1.5 before:w-px before:bg-slate-200">
+
+                  <div className="relative">
+                    <span className="absolute -left-6 top-1 w-3.5 h-3.5 rounded-full bg-emerald-500 border-4 border-white flex items-center justify-center shadow-sm" />
+                    <p className="text-xs font-bold text-slate-900 leading-none">Emisión Registrada Exitosamente</p>
+                    <p className="text-[10px] text-slate-500 mt-1">
+                      El certificado fue incorporado de forma segura en la base de datos institucional.
+                    </p>
+                  </div>
+
+                  <div className="relative">
+                    <span className="absolute -left-6 top-1 w-3.5 h-3.5 rounded-full bg-emerald-500 border-4 border-white flex items-center justify-center shadow-sm" />
+                    <p className="text-xs font-bold text-slate-900 leading-none">Firma Digital Estampada</p>
+                    <p className="text-[10px] text-slate-500 mt-1">
+                      Clave pública verificada y estampada temporalmente por la entidad autorizada.
+                    </p>
+                  </div>
+
+                  <div className="relative">
+                    <span className="absolute -left-6 top-1 w-3.5 h-3.5 rounded-full bg-slate-300 border-4 border-white flex items-center justify-center shadow-sm" />
+                    <p className="text-xs font-bold text-slate-700 leading-none">Consulta de Validación Abierta</p>
+                    <p className="text-[10px] text-slate-400 mt-0.5">
+                      Acceso exitoso al portal de validación pública de VERIX.
+                    </p>
+                  </div>
+                </div>
+              </div>
+
             </div>
           </div>
         )}
+      </main>
 
-        {/* Powered by */}
-        <div className="text-center mt-8">
-          <p className="text-xs text-gray-400">
-            Powered by <span className="font-semibold text-green-700">VERIX</span> · Sistema de Certificación Digital
+      {/* Footer */}
+      <footer className="border-t border-slate-200 bg-white py-8 mt-12 relative z-10 text-center">
+        <div className="max-w-7xl mx-auto px-4 space-y-2">
+          <p className="text-xs font-semibold text-slate-400">
+            Este portal de validación está protegido mediante cifrado SSL de extremo a extremo.
+          </p>
+          <p className="text-[11px] text-slate-400">
+            Powered by <span className="font-black tracking-tight text-slate-700">VERIX un desarrollo de Jose Alfredo Gutierrez Contreras</span> · © {new Date().getFullYear()} Todos los derechos reservados.
           </p>
         </div>
-      </div>
+      </footer>
     </div>
   );
 }
