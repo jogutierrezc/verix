@@ -23,7 +23,7 @@ const SLIDES: Slide[] = [
   {
     tag: 'Seguridad Total',
     tagColor: 'text-emerald-300 bg-emerald-500/20 border-emerald-500/30',
-    title: 'La plataforma definitiva para tus certificados seguros.',
+    title: 'La plataforma definitiva para tu firma digital y certificados seguros.',
     description:
       'VERIX implementa criptografía de punta y firmas digitales distribuidas para asegurar que cada credencial emitida sea absolutamente inalterable, rápida de verificar y aceptada globalmente.',
   },
@@ -218,7 +218,7 @@ export function LoginPage() {
         {/* Footer - absolute bottom */}
         <div className="absolute bottom-0 left-0 right-0 z-10 px-12 pb-6">
           <div className="flex justify-between items-center text-xs text-emerald-200/60 border-t border-white/10 pt-6">
-            <span>© 2026 VERIX Inc. Todos los derechos reservados.</span>
+            <span>© 2026 VERIX. un desarrollo de Jose Gutierrez Todos los derechos reservados.</span>
             <div className="flex gap-4">
               <span className="hover:text-white transition-colors cursor-pointer">Seguridad</span>
               <span>•</span>
@@ -241,7 +241,7 @@ export function LoginPage() {
               </div>
             </div>
             <p className="text-on-surface-variant text-xs font-semibold tracking-wide uppercase">
-              Plataforma Institucional de Certificados
+              Plataforma de Firma Digital y Certificados Electrónicos
             </p>
           </div>
 
@@ -347,7 +347,7 @@ export function LoginPage() {
 
           {/* Simple footer */}
           <p className="text-center text-xs text-slate-400">
-            © 2026 VERIX · Plataforma Institucional de Certificados
+            © 2026 VERIX · Plataforma de Firma Electrónica y Certificados Digitales · Todos los derechos reservados.
           </p>
         </div>
       </div>

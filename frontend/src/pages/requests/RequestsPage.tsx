@@ -816,17 +816,14 @@ export function RequestsPage() {
                                     <Eye size={15} />
                                   </button>
                                 )}
-                                {user?.role === 'APPLICANT' && isRequestDownloadable(req) && (
-                                  <a
-                                    href={req.certificate_url}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
+                                {(req.status === 'APPROVED' || req.status === 'SIGNED') && (
+                                  <button
+                                    onClick={(e) => { e.stopPropagation(); setPreviewRequestId(req.id); }}
                                     className="p-1.5 hover:bg-primary/10 rounded-full text-primary transition-colors"
-                                    title="Descargar"
-                                    onClick={e => e.stopPropagation()}
+                                    title="Ver/Descargar certificado"
                                   >
-                                    <Download size={15} />
-                                  </a>
+                                    <Eye size={15} />
+                                  </button>
                                 )}
                               </div>
                             </div>

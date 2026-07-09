@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { supabase } from '../../lib/supabase';
+import { supabase, STORAGE } from '../../lib/supabase';
 import { auditApi, getClientIP } from '../../services/api';
 import { X, CheckCircle, XCircle, Download, FileText, Loader2, Signature, Printer } from 'lucide-react';
 import { QRCodeCanvas } from 'qrcode.react';
@@ -419,8 +419,8 @@ export function CertificatePreview({
     }
   };
 
-  /** Genera el PDF directamente (vector/texto) y lo devuelve como base64 para firma digital */
-  const generatePdfBase64 = async (): Promise<string | null> => {
+  /** Genera el PDF y lo sube a Storage, devolviendo la ruta y URL pública */
+  const uploadUnsignedPdf = async (): Promise<{ storagePath: string; publicUrl: string } | null> => {
     try {
       const selectedSig = selectedSignatureId
         ? signatures.find(s => s.id === selectedSignatureId) || null
@@ -435,12 +435,29 @@ export function CertificatePreview({
         selectedSig,
       );
 
-      const pdfBytes = new Uint8Array(pdf.output('arraybuffer'));
-      let binary = '';
-      for (let i = 0; i < pdfBytes.length; i++) binary += String.fromCharCode(pdfBytes[i]);
-      return btoa(binary);
+      const pdfBlob = pdf.output('blob');
+      const fileName = `unsigned-${requestId}-${Date.now()}.pdf`;
+      const storagePath = `${STORAGE.PATHS.CERTIFICATES(userId)}/${fileName}`;
+
+      const { error: uploadError } = await supabase.storage
+        .from(STORAGE.BUCKET)
+        .upload(storagePath, pdfBlob, {
+          contentType: 'application/pdf',
+          upsert: true,
+        });
+
+      if (uploadError) {
+        console.error('Error uploading unsigned PDF:', uploadError);
+        return null;
+      }
+
+      const { data: { publicUrl } } = supabase.storage
+        .from(STORAGE.BUCKET)
+        .getPublicUrl(storagePath);
+
+      return { storagePath, publicUrl };
     } catch (err) {
-      console.error('Error generating PDF:', err);
+      console.error('Error generating/uploading PDF:', err);
       return null;
     }
   };
@@ -459,9 +476,9 @@ export function CertificatePreview({
 
       if (!p12Cert) return false; // No P12 cert, skip digital signing
 
-      // 2. Generate PDF as base64
-      const pdfBase64 = await generatePdfBase64();
-      if (!pdfBase64) return false;
+      // 2. Generate PDF and upload to Storage (evita base64 → ahorra memoria ~30%)
+      const uploadResult = await uploadUnsignedPdf();
+      if (!uploadResult) return false;
 
       // 3. Prepare reviewer notes
       let reviewerNotes: string | undefined;
@@ -477,12 +494,12 @@ export function CertificatePreview({
         }
       }
 
-      // 4. Call sign-pdf Edge Function
+      // 4. Call sign-pdf Edge Function (con ruta de Storage en vez de base64)
       const { error: fnError, data: result } = await supabase.functions.invoke('sign-pdf', {
         body: {
           request_id: requestId,
           user_id: userId,
-          pdf_base64: pdfBase64,
+          pdf_storage_path: uploadResult.storagePath,
           reviewed_by: userId,
           reviewer_notes: reviewerNotes,
           consecutive_number: generatedRadicado?.code,
@@ -552,6 +569,21 @@ export function CertificatePreview({
         .eq('id', requestId);
 
       if (error) throw error;
+
+      // ── Generar PDF y subirlo a Storage (certificate_url) ──
+      // Así todos los certificados aprobados tienen PDF descargable
+      // aunque la firma digital no esté disponible
+      try {
+        const uploadResult = await uploadUnsignedPdf();
+        if (uploadResult) {
+          await supabase
+            .from('certificate_requests')
+            .update({ certificate_url: uploadResult.publicUrl })
+            .eq('id', requestId);
+        }
+      } catch (uploadErr) {
+        console.warn('⚠️ No se pudo generar el PDF automático:', uploadErr);
+      }
 
       // ── Audit log: firma aprobada ──
       try {
