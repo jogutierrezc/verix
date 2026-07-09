@@ -6,6 +6,7 @@ import { QRCodeCanvas } from 'qrcode.react';
 import QRCode from 'qrcode';
 import toast from 'react-hot-toast';
 import jsPDF from 'jspdf';
+import { getPageDimensions, type PageSizeName } from '../../lib/pageSizes';
 import type { TemplateElement } from '../editor/TemplateCanvas';
 
 interface CertificatePreviewProps {
@@ -147,6 +148,7 @@ async function loadImageToDataUrl(url: string): Promise<string | null> {
 
 /**
  * Generates a PDF by rendering each template element to exactly match the preview.
+ * Supports multi-page templates: elements are grouped by their `page` field.
  * Uses splitTextToSize for precise multi-line text, aspect-ratio-preserving images,
  * proper padding, line-height, backgrounds, and borders matching the preview CSS.
  */
@@ -166,7 +168,27 @@ export async function renderTemplateToPdf(
   const PAD_Y = 2;  // preview: padding '2px 4px' → vertical 2px
   const LINE_HEIGHT = 1.2;  // preview: lineHeight 1.2
 
+  // ── Group elements by page and sort by page number ──
+  const pageMap = new Map<number, TemplateElement[]>();
   for (const el of elements) {
+    const page = el.page ?? 0;
+    if (!pageMap.has(page)) pageMap.set(page, []);
+    pageMap.get(page)!.push(el);
+  }
+  const sortedPages = [...pageMap.keys()].sort((a, b) => a - b);
+
+  if (sortedPages.length === 0) return pdf;
+
+  // ── Render each page (using for...of to support async/await) ──
+  for (const [idx, pageIndex] of sortedPages.entries()) {
+    // First page is already created by the constructor; addPage for subsequent pages
+    if (idx > 0) {
+      pdf.addPage([pageWidth, pageHeight], orientation);
+    }
+
+    const pageElements = pageMap.get(pageIndex) || [];
+
+    for (const el of pageElements) {
     const content = fillTemplate(el.content, requestData);
     const x = el.x;
     const y = el.y;
@@ -330,6 +352,7 @@ export async function renderTemplateToPdf(
       }
     } catch (err) {
       console.warn(`⚠️ Error rendering element ${el.id || el.type}:`, err);
+    }
     }
   }
 
@@ -796,11 +819,11 @@ export function CertificatePreview({
 
   const elements: TemplateElement[] = rawConfig?.elements || [];
   const pageOrientation = rawConfig?.orientation || 'landscape';
-  const pageWidth = pageOrientation === 'landscape' ? 842 : 595;
-  const pageHeight = pageOrientation === 'landscape' ? 595 : 842;
+  const pageSizeName: PageSizeName = rawConfig?.pageSize || 'A4';
+  const { width: pageWidth, height: pageHeight } = getPageDimensions(pageSizeName, pageOrientation);
   const scale = 0.55;
 
-  // Build the data dictionary with all available variables for template substitution
+  // Build data dictionary with variables for template substitution
   const rawRequestData = request?.data || {};
   const requestCode = request?.code || '';
   const verificationCode = request?.verification_code || requestCode;

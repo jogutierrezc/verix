@@ -311,6 +311,8 @@ export function TemplateEditorPage() {
   const [code, setCode] = useState('');
   const [category, setCategory] = useState('certificate');
   const [orientation, setOrientation] = useState<'portrait' | 'landscape'>('landscape');
+  const [pageSize, setPageSize] = useState<'A4' | 'LETTER' | 'LEGAL'>('A4');
+  const [activePage, setActivePage] = useState(0);
   const [elements, setElements] = useState<TemplateElement[]>([]);
   const [logoUrl, setLogoUrl] = useState<string>('');
   const [dependencyId, setDependencyId] = useState('');
@@ -322,6 +324,12 @@ export function TemplateEditorPage() {
   const [customVariables, setCustomVariables] = useState<{ key: string; label: string }[]>([]);
   const [newCustomVarName, setNewCustomVarName] = useState('');
   const [margins, setMargins] = useState({ top: 40, bottom: 40, left: 40, right: 40 });
+
+  // Compute page numbers from elements
+  const pageNumbers = [...new Set(elements.map(el => el.page ?? 0))].sort((a, b) => a - b);
+  const totalPages = Math.max(pageNumbers.length, 1);
+  // Ensure activePage is within range after filtering
+  const safeActivePage = Math.min(activePage, Math.max(...pageNumbers, 0));
 
   const selectedElement = elements.find((el) => el.id === selectedElementId) || null;
 
@@ -356,13 +364,18 @@ export function TemplateEditorPage() {
         setCode(data.code);
         setCategory(data.category || 'certificate');
         setOrientation(data.orientation as 'portrait' | 'landscape');
-        setDependencyId(data.dependency_id || '');
         const config = data.config as any;
+        setPageSize((data.page_size as any) || config?.pageSize || 'A4');
+        setDependencyId(data.dependency_id || '');
         setElements(config?.elements || []);
         setLogoUrl(config?.logoUrl || '');
         if (config?.margins) {
           setMargins(config.margins);
         }
+        // Restore active page from elements
+        const pages = new Set(config?.elements?.map((el: any) => el.page ?? 0) || [0]);
+        setActivePage(0);
+        if (config?.activePage !== undefined) setActivePage(config.activePage);
 
         // Load custom variables from template (those not in the predefined list)
         const savedVars = Array.isArray(data.variables) ? data.variables : [];
@@ -488,12 +501,13 @@ export function TemplateEditorPage() {
         code,
         category,
         orientation,
+        page_size: pageSize,
         dependency_id: dependencyId,
         config: {
           elements,
           logoUrl,
           margins,
-          pageSize: 'A4',
+          pageSize,
           orientation,
         },
         variables: [...CERTIFICATE_VARIABLES.map(v => v.key), ...customVariables.map(v => v.key)],
@@ -553,14 +567,74 @@ export function TemplateEditorPage() {
             <option value="constancy">Constancia</option>
             <option value="academic">Académico</option>
           </select>
+          <select className="input w-28" value={pageSize} onChange={e => setPageSize(e.target.value as any)}>
+            <option value="A4">A4</option>
+            <option value="LETTER">Carta</option>
+            <option value="LEGAL">Oficio</option>
+          </select>
           <select className="input w-28" value={orientation} onChange={e => setOrientation(e.target.value as any)}>
             <option value="landscape">Horizontal</option>
             <option value="portrait">Vertical</option>
           </select>
         </div>
-        <button onClick={handleSave} disabled={saving} className="btn-primary btn-sm">
-          <Save size={16} /> {saving ? 'Guardando...' : 'Publicar'}
-        </button>
+        <div className="flex items-center gap-1">
+          {/* Page navigation */}
+          <span className="text-xs text-on-surface-variant/60 mr-1">
+            Pág {safeActivePage + 1}/{totalPages}
+          </span>
+          <button
+            onClick={() => setActivePage(p => Math.max(0, p - 1))}
+            disabled={safeActivePage <= 0}
+            className="btn-ghost btn-xs px-1.5 py-1"
+            title="Página anterior"
+          >
+            ◀
+          </button>
+          <button
+            onClick={() => setActivePage(p => Math.min(totalPages - 1, p + 1))}
+            disabled={safeActivePage >= totalPages - 1}
+            className="btn-ghost btn-xs px-1.5 py-1"
+            title="Siguiente página"
+          >
+            ▶
+          </button>
+          <button
+            onClick={() => {
+              const nextPage = totalPages;
+              const currentEls = elements.filter(el => (el.page ?? 0) === safeActivePage);
+              // Always create at least one element on the new page to make it visible
+              const newElements = [...elements];
+              if (currentEls.length > 0) {
+                // Copy elements of current page to new page
+                const copied = currentEls.map(el => ({
+                  ...el,
+                  id: `el-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+                  page: nextPage,
+                }));
+                setElements([...newElements, ...copied]);
+              } else {
+                // Add a small spacer element so the page actually exists
+                const spacer: TemplateElement = {
+                  id: `el-${Date.now()}-spacer`,
+                  type: 'text',
+                  x: 0, y: 0, width: 1, height: 1,
+                  content: '', fontSize: 1,
+                  page: nextPage,
+                };
+                setElements([...newElements, spacer]);
+              }
+              setActivePage(nextPage);
+            }}
+            disabled={totalPages >= 20}
+            className="btn-ghost btn-xs px-1.5 py-1"
+            title="Añadir página"
+          >
+            + Pág
+          </button>
+          <button onClick={handleSave} disabled={saving} className="btn-primary btn-sm ms-2">
+            <Save size={16} /> {saving ? 'Guardando...' : 'Publicar'}
+          </button>
+        </div>
       </div>
 
       {/* Workspace */}
@@ -571,6 +645,9 @@ export function TemplateEditorPage() {
             elements={elements}
             onChange={setElements}
             pageOrientation={orientation}
+            pageSize={pageSize}
+            activePage={activePage}
+            onActivePageChange={setActivePage}
             onImageUpload={handleImageUpload}
             onSelectElement={(el) => setSelectedElementId(el?.id || null)}
             selectedElementId={selectedElementId}

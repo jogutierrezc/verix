@@ -5,6 +5,7 @@ import { QRCodeCanvas } from 'qrcode.react';
 import jsPDF from 'jspdf';
 import toast from 'react-hot-toast';
 import { renderTemplateToPdf } from '../../components/certificate/CertificatePreview';
+import { getPageDimensions, type PageSizeName } from '../../lib/pageSizes';
 import {
   CheckCircle,
   XCircle,
@@ -163,8 +164,8 @@ const MOCK_CERTIFICATE = {
 
 const MOCK_TEMPLATE = {
   name: 'Certificado de Aprobación Oficial',
-  config: {
-    orientation: 'landscape',
+  config: {        orientation: 'landscape',
+        pageSize: 'A4',
     elements: [
       { id: 1, type: 'shape', x: 20, y: 20, width: 802, height: 555, color: '#1e3a8a' },
       { id: 2, type: 'text', content: 'CERTIFICADO DE APROBACIÓN', x: 100, y: 70, width: 642, height: 40, fontSize: 26, bold: true, align: 'center', fontFamily: 'serif', color: '#1e3a8a' },
@@ -333,8 +334,8 @@ export function ValidationPage() {
   const rawConfig = templateConfig || {};
   const elements: any[] = rawConfig?.elements || [];
   const pageOrientation = rawConfig?.orientation || 'landscape';
-  const pageWidth = pageOrientation === 'landscape' ? 842 : 595;
-  const pageHeight = pageOrientation === 'landscape' ? 595 : 842;
+  const pageSizeName: PageSizeName = rawConfig?.pageSize || 'A4';
+  const { width: pageWidth, height: pageHeight } = getPageDimensions(pageSizeName, pageOrientation);
   const certScale = 0.52;
 
   const rawRequestData = request?.data || {};
@@ -827,7 +828,7 @@ export function ValidationPage() {
                     <span className="font-medium tracking-tight text-slate-300">PREVISUALIZACIÓN DEL DOCUMENTO</span>
                   </div>
                   <span className="text-[10px] font-mono tracking-wider text-slate-500">
-                    {pageOrientation === 'landscape' ? '842x595 (Apaisado)' : '595x842 (Vertical)'}
+                    {pageWidth}×{pageHeight} ({pageOrientation === 'landscape' ? 'Apaisado' : 'Vertical'})
                   </span>
                 </div>
 

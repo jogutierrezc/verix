@@ -10,6 +10,7 @@ import JSZip from 'jszip';
 import { saveAs } from 'file-saver';
 import { CertificatePreview, renderTemplateToPdf, fillTemplate, convertDatesInData, safeJsonParse } from '../../components/certificate/CertificatePreview';
 import type { TemplateElement } from '../../components/editor/TemplateCanvas';
+import { getPageDimensions, type PageSizeName } from '../../lib/pageSizes';
 import { SkeletonCard } from '../../components/ui/SkeletonCard';
 
 const statusConfig: Record<string, { label: string; color: string; bg: string; borderColor: string }> = {
@@ -423,8 +424,8 @@ export function RequestsPage() {
 
       const elements: TemplateElement[] = rawConfig.elements || [];
       const pageOrientation = rawConfig.orientation || 'landscape';
-      const pageWidth = pageOrientation === 'landscape' ? 842 : 595;
-      const pageHeight = pageOrientation === 'landscape' ? 595 : 842;
+      const pageSizeName: PageSizeName = rawConfig.pageSize || 'A4';
+      const { width: pageWidth, height: pageHeight } = getPageDimensions(pageSizeName, pageOrientation);
 
       // 2. Build request data with validation URL
       const rawData = req.data || {};
@@ -556,8 +557,8 @@ export function RequestsPage() {
 
           const elements: TemplateElement[] = templateConfig.elements || [];
           const pageOrientation = templateConfig.orientation || 'landscape';
-          const pageWidth = pageOrientation === 'landscape' ? 842 : 595;
-          const pageHeight = pageOrientation === 'landscape' ? 595 : 842;
+          const pageSizeName: PageSizeName = templateConfig.pageSize || 'A4';
+          const { width: pageWidth, height: pageHeight } = getPageDimensions(pageSizeName, pageOrientation);
 
           const rawData = req.data || {};
           const reqCode = req.code || '';

@@ -1,6 +1,7 @@
 import React, { useState, useRef } from 'react';
-import { Trash2, Type, Image, QrCode, Hash, Calendar, Signature, Square, Minus, Upload } from 'lucide-react';
+import { Trash2, Type, Image, QrCode, Hash, Calendar, Signature, Square, Minus, Upload, Plus, Copy } from 'lucide-react';
 import toast from 'react-hot-toast';
+import { getPageDimensions, PageSizeName } from '../../lib/pageSizes';
 
 export interface TemplateElement {
   id: string;
@@ -18,6 +19,8 @@ export interface TemplateElement {
   fontFamily?: string;
   imageUrl?: string;
   fieldKey?: string;
+  /** Page index for multi-page templates (0 = first page) */
+  page?: number;
 }
 
 export interface CanvasMargins {
@@ -31,6 +34,9 @@ interface TemplateCanvasProps {
   elements: TemplateElement[];
   onChange: (elements: TemplateElement[]) => void;
   pageOrientation?: 'portrait' | 'landscape';
+  pageSize?: PageSizeName;
+  activePage?: number;
+  onActivePageChange?: (page: number) => void;
   onImageUpload?: (file: File) => Promise<string>;
   onSelectElement?: (element: TemplateElement | null) => void;
   selectedElementId?: string | null;
@@ -62,7 +68,10 @@ const TOOLS = [
 export function TemplateCanvas({
   elements,
   onChange,
-  pageOrientation,
+  pageOrientation = 'portrait',
+  pageSize = 'A4',
+  activePage = 0,
+  onActivePageChange,
   onImageUpload,
   onSelectElement,
   selectedElementId,
@@ -75,9 +84,21 @@ export function TemplateCanvas({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState('');
 
-  const width = pageOrientation === 'landscape' ? 842 : 595;
-  const height = pageOrientation === 'landscape' ? 595 : 842;
+  const { width, height } = getPageDimensions(pageSize, pageOrientation);
   const scale = 0.6;
+
+  // Get elements for current page only
+  const pageElements = elements.filter(el => (el.page ?? 0) === activePage);
+
+  // Get all page numbers from elements
+  const pageNumbers = [...new Set(elements.map(el => el.page ?? 0))].sort((a, b) => a - b);
+  const totalPages = Math.max(pageNumbers.length, 1);
+
+  // Ensure activePage is valid
+  const safeActivePage = Math.min(activePage, Math.max(...pageNumbers, 0));
+  if (safeActivePage !== activePage && onActivePageChange) {
+    onActivePageChange(safeActivePage);
+  }
 
   const addElement = (type: string) => {
     const defaults = DEFAULT_ELEMENTS[type];
@@ -93,9 +114,29 @@ export function TemplateCanvas({
       ...defaults,
       x: 50 + Math.random() * 80,
       y: 50 + Math.random() * 80,
+      page: safeActivePage, // assign to current page
     } as TemplateElement;
     onChange([...elements, newElement]);
     onSelectElement?.(newElement);
+  };
+
+  /** Add a new blank page */
+  const addNewPage = () => {
+    const nextPage = totalPages;
+    // No elements needed - empty page will show indicator
+    if (onActivePageChange) onActivePageChange(nextPage);
+  };
+
+  /** Duplicate the current page's elements to a new page */
+  const duplicatePage = () => {
+    const nextPage = totalPages;
+    const duplicatedElements = pageElements.map(el => ({
+      ...el,
+      id: `el-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+      page: nextPage,
+    }));
+    onChange([...elements, ...duplicatedElements]);
+    if (onActivePageChange) onActivePageChange(nextPage);
   };
 
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
