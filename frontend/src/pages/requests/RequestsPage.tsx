@@ -392,6 +392,100 @@ export function RequestsPage() {
     });
   };
 
+  // ── Download a single request PDF with Firma Electrónica (signature + QR) ──
+  const downloadSignedPdf = async (req: any) => {
+    setDownloading(true);
+    try {
+      toast.loading('Generando PDF con firma electrónica...', { id: `signed-pdf-${req.id}` });
+
+      // 1. Load template config
+      let rawConfig: any = null;
+      if (req.template_id) {
+        const { data: tmpl } = await supabase
+          .from('templates')
+          .select('config')
+          .eq('id', req.template_id)
+          .single();
+
+        if (tmpl) {
+          rawConfig = tmpl.config?.elements
+            ? tmpl.config
+            : tmpl.config?.config
+              ? (typeof tmpl.config.config === 'string' ? safeJsonParse(tmpl.config.config) : tmpl.config.config)
+              : typeof tmpl.config === 'string' ? safeJsonParse(tmpl.config) : (tmpl.config || {});
+        }
+      }
+
+      if (!rawConfig) {
+        toast.error('No se encontró la plantilla del certificado', { id: `signed-pdf-${req.id}` });
+        return;
+      }
+
+      const elements: TemplateElement[] = rawConfig.elements || [];
+      const pageOrientation = rawConfig.orientation || 'landscape';
+      const pageWidth = pageOrientation === 'landscape' ? 842 : 595;
+      const pageHeight = pageOrientation === 'landscape' ? 595 : 842;
+
+      // 2. Build request data with validation URL
+      const rawData = req.data || {};
+      const reqCode = req.code || '';
+      const verificationCode = req.verification_code || reqCode;
+      const validationUrl = `${window.location.origin}/validate/${verificationCode}`;
+
+      const requestData = {
+        ...convertDatesInData(rawData),
+        codigo: verificationCode,
+        codigo_certificado: verificationCode,
+        codigo_solicitud: reqCode,
+        id_solicitud: reqCode,
+        codigo_verificacion: verificationCode,
+        qr_content: validationUrl,
+        ...(req.consecutive_number ? {
+          radicado: req.consecutive_number,
+          consecutivo: req.consecutive_number,
+        } : {}),
+        ...(req.batch_id ? {
+          lote_id: req.batch_id,
+          lote_total: String(req.batch_total || ''),
+          lote_indice: String((req.row_index ?? -1) + 1),
+        } : {}),
+      };
+
+      // 3. Extract signature from reviewer_notes (if available)
+      let selectedSignature: { signature_image_url?: string } | null = null;
+      if (req.reviewer_notes) {
+        try {
+          const parsed = typeof req.reviewer_notes === 'string'
+            ? JSON.parse(req.reviewer_notes)
+            : req.reviewer_notes;
+          if (parsed?.signature_url) {
+            selectedSignature = { signature_image_url: parsed.signature_url };
+          }
+        } catch {
+          // Not valid JSON
+        }
+      }
+
+      // 4. Generate PDF with signature
+      const pdf = await renderTemplateToPdf(
+        elements,
+        pageOrientation,
+        pageWidth,
+        pageHeight,
+        requestData,
+        selectedSignature,
+      );
+
+      pdf.save(`certificado-${reqCode || req.id.substring(0, 8)}-firmado.pdf`);
+      toast.success('✅ PDF con firma electrónica descargado', { id: `signed-pdf-${req.id}` });
+    } catch (err: any) {
+      toast.error('Error al generar PDF: ' + (err.message || ''), { id: `signed-pdf-${req.id}` });
+      console.error('❌ Error generando PDF firmado:', err);
+    } finally {
+      setDownloading(false);
+    }
+  };
+
   // ── Download batch as ZIP — generates PDFs on-the-fly for ALL requests ──
   const downloadBatchAsZip = async (batchId: string, batchReqs: any[]) => {
     if (batchReqs.length === 0) {
@@ -665,13 +759,25 @@ export function RequestsPage() {
                         </>
                       )}
                       {(req.status === 'APPROVED' || req.status === 'SIGNED') && (
-                        <button
-                          onClick={() => setPreviewRequestId(req.id)}
-                          className="p-2 hover:bg-primary/10 rounded-full text-primary transition-colors"
-                          title="Ver certificado"
-                        >
-                          <Download size={18} />
-                        </button>
+                        <>
+                          <button
+                            onClick={() => {
+                              setPreviewRequestId(req.id);
+                            }}
+                            className="p-2 hover:bg-primary/10 rounded-full text-primary transition-colors"
+                            title="Ver certificado"
+                          >
+                            <Eye size={18} />
+                          </button>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); downloadSignedPdf(req); }}
+                            disabled={downloading}
+                            className="p-2 hover:bg-primary/10 rounded-full text-primary transition-colors"
+                            title="Descargar PDF con Firma Electrónica"
+                          >
+                            <Download size={18} />
+                          </button>
+                        </>
                       )}
                       <button className="p-2 hover:bg-surface-container-high rounded-full text-on-surface-variant transition-colors">
                         <MoreHorizontal size={18} />
@@ -808,6 +914,7 @@ export function RequestsPage() {
                               </span>
                               <div className="flex items-center gap-1">
                                 {(req.status === 'APPROVED' || req.status === 'SIGNED') && (
+                                <>
                                   <button
                                     onClick={(e) => { e.stopPropagation(); setPreviewRequestId(req.id); }}
                                     className="p-1.5 hover:bg-primary/10 rounded-full text-primary transition-colors"
@@ -815,16 +922,16 @@ export function RequestsPage() {
                                   >
                                     <Eye size={15} />
                                   </button>
-                                )}
-                                {(req.status === 'APPROVED' || req.status === 'SIGNED') && (
                                   <button
-                                    onClick={(e) => { e.stopPropagation(); setPreviewRequestId(req.id); }}
+                                    onClick={(e) => { e.stopPropagation(); downloadSignedPdf(req); }}
+                                    disabled={downloading}
                                     className="p-1.5 hover:bg-primary/10 rounded-full text-primary transition-colors"
-                                    title="Ver/Descargar certificado"
+                                    title="Descargar PDF con Firma Electrónica"
                                   >
-                                    <Eye size={15} />
+                                    <Download size={15} />
                                   </button>
-                                )}
+                                </>
+                              )}
                               </div>
                             </div>
                           </div>

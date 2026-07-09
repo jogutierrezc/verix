@@ -146,8 +146,9 @@ async function loadImageToDataUrl(url: string): Promise<string | null> {
 }
 
 /**
- * Generates a PDF by rendering each template element directly with jsPDF.
- * No html2canvas involved — text is vector, images are native resolution.
+ * Generates a PDF by rendering each template element to exactly match the preview.
+ * Uses splitTextToSize for precise multi-line text, aspect-ratio-preserving images,
+ * proper padding, line-height, backgrounds, and borders matching the preview CSS.
  */
 export async function renderTemplateToPdf(
   elements: TemplateElement[],
@@ -160,6 +161,11 @@ export async function renderTemplateToPdf(
   const orientation = pageOrientation === 'landscape' ? 'l' : 'p';
   const pdf = new jsPDF(orientation, 'pt', [pageWidth, pageHeight]);
 
+  // ── Match preview CSS constants ──
+  const PAD_X = 4;  // preview: padding '2px 4px' → horizontal 4px
+  const PAD_Y = 2;  // preview: padding '2px 4px' → vertical 2px
+  const LINE_HEIGHT = 1.2;  // preview: lineHeight 1.2
+
   for (const el of elements) {
     const content = fillTemplate(el.content, requestData);
     const x = el.x;
@@ -168,93 +174,158 @@ export async function renderTemplateToPdf(
     const h = el.height;
     const color = el.color || '#191c1e';
     const rgb = hexToRgb(color);
+    const align = el.align || 'left';
+    const fontSize = el.fontSize || 14;
 
     try {
-      switch (el.type) {
-        case 'text':
-        case 'date':
-        case 'consecutive': {
-          const fontSize = el.fontSize || 14;
-          if (content) {
-            pdf.setFont(mapFont(el.fontFamily), mapFontStyle(el.bold, el.italic));
-            pdf.setFontSize(fontSize);
-            pdf.setTextColor(rgb[0], rgb[1], rgb[2]);
+      // ── 1. BACKGROUND: white background only for QR (matches preview bg-white)
+      if (el.type === 'qr') {
+        pdf.setFillColor(255, 255, 255);
+        pdf.rect(x, y, w, h, 'F');
+      }
 
-            const align = el.align || 'left';
-            const p = 4; // pt padding, matching preview's 4px
+      // ── 2. SHAPE / LINE BORDER ──
+      if (el.type === 'shape') {
+        pdf.setDrawColor(rgb[0], rgb[1], rgb[2]);
+        pdf.setLineWidth(0.5);
+        pdf.rect(x, y, w, h, 'S');
+      } else if (el.type === 'line') {
+        pdf.setDrawColor(rgb[0], rgb[1], rgb[2]);
+        pdf.setLineWidth(0.5);
+        pdf.line(x, y + h / 2, x + w, y + h / 2);
+      }
 
-            // Horizontal position depends on alignment (jsPDF centers/ends text at the x coordinate)
-            let textX: number;
-            if (align === 'center') {
-              textX = x + w / 2;
-            } else if (align === 'right') {
-              textX = x + w - p;
+      // ── 3. IMAGE (preserve aspect ratio like preview's object-contain) ──
+      if (el.type === 'image' && el.imageUrl) {
+        const imgData = await loadImageToDataUrl(el.imageUrl);
+        if (imgData) {
+          const fmt = imgData.startsWith('data:image/png') ? 'PNG' : 'JPEG';
+          // Get actual image dimensions to preserve aspect ratio
+          const imgDims = await getImageDimensions(imgData);
+          if (imgDims) {
+            const imgAspect = imgDims.width / imgDims.height;
+            const boxAspect = w / h;
+            let drawW: number, drawH: number;
+            if (imgAspect > boxAspect) {
+              // Image wider than box → fit to width
+              drawW = w;
+              drawH = w / imgAspect;
             } else {
-              textX = x + p;
+              // Image taller than box → fit to height
+              drawH = h;
+              drawW = h * imgAspect;
             }
-
-            // Vertically center within element bounds (matching preview's align-items: center)
-            const textY = y + h / 2;
-
-            pdf.text(content, textX, textY, {
-              maxWidth: w - p * 2,
-              align,
-              baseline: 'middle',
-            });
+            // Center within element (matching preview's flex align-items/justify-content center)
+            const drawX = x + (w - drawW) / 2;
+            const drawY = y + (h - drawH) / 2;
+            pdf.addImage(imgData, fmt, drawX, drawY, drawW, drawH);
+          } else {
+            // Fallback: stretch to fill
+            pdf.addImage(imgData, fmt, x, y, w, h);
           }
-          break;
         }
+      }
 
-        case 'image': {
-          if (el.imageUrl) {
-            const imgData = await loadImageToDataUrl(el.imageUrl);
-            if (imgData) {
-              const fmt = imgData.startsWith('data:image/png') ? 'PNG' : 'JPEG';
-              pdf.addImage(imgData, fmt, x, y, w, h);
-            }
-          }
-          break;
+      // ── 4. QR CODE (always uses validation URL, same as preview) ──
+      if (el.type === 'qr') {
+        try {
+          // Build the validation URL from request data or from content
+          const code = requestData['codigo_verificacion'] || requestData['verification_code'] || requestData['codigo'] || '';
+          const baseUrl = typeof window !== 'undefined' ? window.location.origin : '';
+          const validationUrl = `${baseUrl}/validate/${code}`;
+          // Always use full validation URL for QR, regardless of template content
+          const qrValue = requestData['qr_content'] || validationUrl;
+
+          const qrNativeSize = Math.round(Math.min(w, h) * 4);
+          const qrDataUrl = await QRCode.toDataURL(qrValue, {
+            width: Math.max(qrNativeSize, 200),
+            margin: 1,
+            color: { dark: '#006e2f', light: '#ffffff' },
+          });
+          // QR occupies 90% of the smaller dimension (matching preview's css sizing)
+          const qrSize = Math.min(w, h) * 0.9;
+          const qrX = x + (w - qrSize) / 2;
+          const qrY = y + (h - qrSize) / 2;
+          pdf.addImage(qrDataUrl, 'PNG', qrX, qrY, qrSize, qrSize);
+        } catch {
+          // QR generation failed — skip
         }
+      }
 
-        case 'qr': {
-          try {
-            const qrDataUrl = await QRCode.toDataURL(content || ' ', {
-              width: Math.round(Math.min(w, h) * 4),
-              margin: 1,
-              color: { dark: '#006e2f', light: '#ffffff' },
-            });
-            const qrSize = Math.min(w, h) * 0.9;
-            const qrX = x + (w - qrSize) / 2;
-            const qrY = y + (h - qrSize) / 2;
-            pdf.addImage(qrDataUrl, 'PNG', qrX, qrY, qrSize, qrSize);
-          } catch {
-            // QR generation failed, skip
-          }
-          break;
-        }
-
-        case 'signature': {
-          if (selectedSignature?.signature_image_url) {
-            const imgData = await loadImageToDataUrl(selectedSignature.signature_image_url);
-            if (imgData) {
+      // ── 5. SIGNATURE IMAGE ──
+      if (el.type === 'signature') {
+        if (selectedSignature?.signature_image_url) {
+          const imgData = await loadImageToDataUrl(selectedSignature.signature_image_url);
+          if (imgData) {
+            // Preserve aspect ratio like preview's bg-contain bg-center
+            const imgDims = await getImageDimensions(imgData);
+            if (imgDims) {
+              const imgAspect = imgDims.width / imgDims.height;
+              const boxAspect = w / h;
+              let drawW: number, drawH: number;
+              if (imgAspect > boxAspect) {
+                drawW = w;
+                drawH = w / imgAspect;
+              } else {
+                drawH = h;
+                drawW = h * imgAspect;
+              }
+              const drawX = x + (w - drawW) / 2;
+              const drawY = y + (h - drawH) / 2;
+              pdf.addImage(imgData, 'PNG', drawX, drawY, drawW, drawH);
+            } else {
               pdf.addImage(imgData, 'PNG', x, y, w, h);
             }
           }
-          break;
+        }
+      }
+
+      // ── 6. TEXT (text, date, consecutive) ──
+      if ((el.type === 'text' || el.type === 'date' || el.type === 'consecutive') && content) {
+        pdf.setFont(mapFont(el.fontFamily), mapFontStyle(el.bold, el.italic));
+        pdf.setFontSize(fontSize);
+        pdf.setTextColor(rgb[0], rgb[1], rgb[2]);
+
+        const maxTextWidth = Math.max(1, w - PAD_X * 2);
+
+        // Split text into lines respecting maxWidth (matching preview's wordBreak)
+        const lines = pdf.splitTextToSize(content, maxTextWidth);
+
+        // Calculate actual text block height (lineHeight * fontSize per line)
+        const textBlockHeight = lines.length > 0 ? lines.length * fontSize * LINE_HEIGHT : 0;
+        const availableHeight = h - PAD_Y * 2;
+
+        // Vertical centering: Y = top padding + remaining space / 2
+        // With baseline:'top', text TOP starts at Y
+        let textY: number;
+        if (textBlockHeight < availableHeight) {
+          textY = y + PAD_Y + (availableHeight - textBlockHeight) / 2;
+        } else {
+          textY = y + PAD_Y;
         }
 
-        case 'line': {
-          pdf.setDrawColor(rgb[0], rgb[1], rgb[2]);
-          pdf.setLineWidth(0.5);
-          pdf.line(x, y + h / 2, x + w, y + h / 2);
-          break;
+        // Determine X position based on alignment
+        let textX: number;
+        const textAlign: 'left' | 'center' | 'right' = align === 'justify' ? 'left' : align;
+        if (align === 'center') {
+          textX = x + w / 2;
+        } else if (align === 'right') {
+          textX = x + w - PAD_X;
+        } else {
+          // left / justify preview uses text-align: left + justifyContent flex-start
+          textX = x + PAD_X;
         }
 
-        case 'shape': {
-          pdf.setDrawColor(rgb[0], rgb[1], rgb[2]);
-          pdf.setLineWidth(0.5);
-          pdf.rect(x, y, w, h);
-          break;
+        // Render each line with proper spacing (matches preview's lineHeight: 1.2)
+        if (lines.length > 0) {
+          for (const line of lines) {
+            pdf.text(line, textX, textY, {
+              maxWidth: maxTextWidth,
+              align: textAlign,
+              baseline: 'top',
+            });
+            textY += fontSize * LINE_HEIGHT;
+          }
         }
       }
     } catch (err) {
@@ -263,6 +334,16 @@ export async function renderTemplateToPdf(
   }
 
   return pdf;
+}
+
+/** Get intrinsic dimensions of an image from a data URL */
+function getImageDimensions(dataUrl: string): Promise<{ width: number; height: number } | null> {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => resolve({ width: img.naturalWidth, height: img.naturalHeight });
+    img.onerror = () => resolve(null);
+    img.src = dataUrl;
+  });
 }
 
 export function CertificatePreview({
@@ -356,7 +437,7 @@ export function CertificatePreview({
           number: 0,
         });
       } else {
-        await generateRadicado(req.template_id, req.user?.institution_id || userInstitutionId);
+        await generateRadicado(req.template_id, req.user?.institution_id || userInstitutionId, tmpl?.dependency_id);
       }
     } catch (err: any) {
       console.error('Error loading preview:', err);
@@ -366,13 +447,13 @@ export function CertificatePreview({
     }
   };
 
-  const generateRadicado = async (templateId: string, institutionId: string) => {
+  const generateRadicado = async (templateId: string, institutionId: string, dependencyId?: string | null) => {
     setRadicadoLoading(true);
     try {
       const { data, error } = await supabase.rpc('get_next_radicado_for_template', {
         p_template_id: templateId,
         p_institution_id: institutionId,
-        p_dependency_id: null,
+        p_dependency_id: dependencyId || null,
       });
 
       if (error) {
@@ -394,13 +475,59 @@ export function CertificatePreview({
     }
   };
 
-  const handleDownloadPdf = async () => {
-    try {
-      toast.loading('Generando PDF...', { id: 'pdf-gen' });
 
-      const selectedSig = selectedSignatureId
-        ? signatures.find(s => s.id === selectedSignatureId) || null
-        : null;
+
+  /** Descarga el PDF almacenado en certificate_url (el del bucket) */
+  const handleDownloadNormal = async () => {
+    if (!request?.certificate_url) {
+      toast.error('No hay PDF almacenado para descargar');
+      return;
+    }
+    try {
+      toast.loading('Descargando PDF...', { id: 'pdf-dl' });
+      const response = await fetch(request.certificate_url);
+      if (!response.ok) throw new Error('Error al descargar');
+      const blob = await response.blob();
+      const link = document.createElement('a');
+      const url = URL.createObjectURL(blob);
+      link.href = url;
+      link.download = `certificado-${requestCode || requestId.substring(0, 8)}.pdf`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+      toast.success('✅ PDF descargado exitosamente', { id: 'pdf-dl' });
+    } catch (err: any) {
+      toast.error('Error al descargar PDF: ' + (err.message || ''), { id: 'pdf-dl' });
+    }
+  };
+
+  /** Descarga el PDF regenerado con la firma electrónica (sobre la marcha) */
+  const handleDownloadSigned = async () => {
+    try {
+      toast.loading('Generando PDF con firma electrónica...', { id: 'pdf-sign' });
+
+      let selectedSig: { signature_image_url?: string } | null = null;
+
+      // Try to use the stored signature from reviewer_notes first
+      if (request?.reviewer_notes) {
+        try {
+          const parsed = typeof request.reviewer_notes === 'string'
+            ? JSON.parse(request.reviewer_notes)
+            : request.reviewer_notes;
+          if (parsed?.signature_url) {
+            selectedSig = { signature_image_url: parsed.signature_url };
+          }
+        } catch { /* not JSON */ }
+      }
+
+      // Fallback: use currently selected signature if pending
+      if (!selectedSig && selectedSignatureId) {
+        const sig = signatures.find(s => s.id === selectedSignatureId);
+        if (sig?.signature_image_url) {
+          selectedSig = { signature_image_url: sig.signature_image_url };
+        }
+      }
 
       const pdf = await renderTemplateToPdf(
         elements,
@@ -411,11 +538,11 @@ export function CertificatePreview({
         selectedSig,
       );
 
-      pdf.save(`certificado-${requestCode || requestId.substring(0, 8)}.pdf`);
-      toast.success('✅ PDF descargado', { id: 'pdf-gen' });
+      pdf.save(`certificado-${requestCode || requestId.substring(0, 8)}-firmado.pdf`);
+      toast.success('✅ PDF con firma electrónica descargado', { id: 'pdf-sign' });
     } catch (err: any) {
-      toast.error('Error al generar PDF: ' + (err.message || 'Error desconocido'), { id: 'pdf-gen' });
-      console.error('PDF generation error:', err);
+      toast.error('Error al generar PDF: ' + (err.message || 'Error desconocido'), { id: 'pdf-sign' });
+      console.error('PDF signed generation error:', err);
     }
   };
 
@@ -1037,20 +1164,38 @@ export function CertificatePreview({
                 </div>
               )}
 
+              {/* Signature badge for signed documents */}
+              {request?.status === 'SIGNED' && (
+                <div className="flex items-center justify-center">
+                  <div className="inline-flex items-center gap-2 px-4 py-2 bg-emerald-50 border border-emerald-200 rounded-xl text-emerald-700 text-sm font-semibold shadow-sm">
+                    <CheckCircle size={18} className="text-emerald-600" />
+                    <span>Documento con Firma Electrónica</span>
+                    <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                  </div>
+                </div>
+              )}
+
               {/* Actions — read-only mode for already approved/signed certificates */}
               {isReadOnly ? (
-                <div className="flex items-center justify-center gap-3 pt-2">
+                <div className="flex flex-col sm:flex-row items-center justify-center gap-3 pt-2">
                   <div className="flex items-center gap-2 px-4 py-2 bg-primary/5 rounded-xl text-primary text-sm font-semibold">
                     <CheckCircle size={16} />
                     Documento emitido — solo lectura
                   </div>
-                  <button onClick={handleDownloadPdf} className="btn-primary px-6 py-3" title="Descargar PDF">
-                    <Download size={18} /> Descargar PDF
-                  </button>
-                  <button onClick={() => window.print()} className="btn-secondary px-4 py-3" title="Imprimir">
-                    <Printer size={18} /> Imprimir
-                  </button>
-                  <button onClick={onClose} className="btn-secondary px-6 py-3">Cerrar</button>
+                  <div className="flex items-center gap-2">
+                    {request?.certificate_url && (
+                      <button onClick={handleDownloadNormal} className="btn-secondary px-4 py-3" title="Descargar PDF">
+                        <Download size={18} /> Descargar PDF
+                      </button>
+                    )}
+                    <button onClick={handleDownloadSigned} className="btn-primary px-6 py-3" title="Descargar PDF con Firma Electrónica">
+                      <Signature size={18} /> PDF Firmado
+                    </button>
+                    <button onClick={() => window.print()} className="btn-secondary px-4 py-3" title="Imprimir">
+                      <Printer size={18} /> Imprimir
+                    </button>
+                    <button onClick={onClose} className="btn-secondary px-6 py-3">Cerrar</button>
+                  </div>
                 </div>
               ) : (
                 <>
@@ -1059,7 +1204,7 @@ export function CertificatePreview({
                       <XCircle size={18} /> Rechazar
                     </button>
                     <div className="flex items-center gap-3">
-                      <button onClick={handleDownloadPdf} className="btn-secondary px-4 py-3" title="Descargar PDF">
+                      <button onClick={handleDownloadSigned} className="btn-secondary px-4 py-3" title="Descargar PDF">
                         <Download size={18} /> PDF
                       </button>
                       <button onClick={() => window.print()} className="btn-secondary px-4 py-3" title="Imprimir">

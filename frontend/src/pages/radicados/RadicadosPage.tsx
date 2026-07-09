@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { useAuth } from '../../hooks/useAuth';
-import { supabase } from '../../lib/supabase';import { Plus, Search, Hash, Trash2, Edit3, Building2, Layers, X
+import { supabase } from '../../lib/supabase';import { Plus, Search, Hash, Trash2, Edit3, Building2, Layers, X, FileText
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { format } from 'date-fns';
@@ -25,6 +25,7 @@ export function RadicadosPage() {
     institution_id: '',
     dependency_id: '',
     template_id: '',
+    templateIds: [] as string[],
     prefix: '',
     suffix: '',
     format: '{prefix}{year}-{number}{suffix}',
@@ -106,6 +107,7 @@ export function RadicadosPage() {
       institution_id: institutions[0]?.id || '',
       dependency_id: '',
       template_id: '',
+      templateIds: [],
       prefix: '',
       suffix: '',
       format: '{prefix}{year}-{number}{suffix}',
@@ -116,7 +118,27 @@ export function RadicadosPage() {
     setShowModal(true);
   };
 
-  const openEdit = (r: any) => {
+  const openEdit = async (r: any) => {
+    // Load existing multi-template relationships
+    let templateIds: string[] = [];
+    try {
+      const { data: junctionData } = await supabase
+        .from('radicado_templates')
+        .select('template_id')
+        .eq('radicado_id', r.id);
+      if (junctionData && junctionData.length > 0) {
+        templateIds = junctionData.map((j: any) => j.template_id);
+      } else if (r.template_id) {
+        // Fallback to legacy single template_id
+        templateIds = [r.template_id];
+      }
+    } catch {
+      // Junction table may not exist yet
+      if (r.template_id) {
+        templateIds = [r.template_id];
+      }
+    }
+
     setEditingId(r.id);
     setForm({
       name: r.name || '',
@@ -125,6 +147,7 @@ export function RadicadosPage() {
       institution_id: r.institution_id || '',
       dependency_id: r.dependency_id || '',
       template_id: r.template_id || '',
+      templateIds,
       prefix: r.prefix || '',
       suffix: r.suffix || '',
       format: r.format || '{prefix}{year}-{number}{suffix}',
@@ -148,7 +171,8 @@ export function RadicadosPage() {
         description: form.description || null,
         institution_id: form.institution_id,
         dependency_id: form.dependency_id || null,
-        template_id: form.template_id || null,
+        // Keep template_id for backward compatibility (first selected template)
+        template_id: form.templateIds.length > 0 ? form.templateIds[0] : (form.template_id || null),
         prefix: form.prefix,
         suffix: form.suffix,
         format: form.format,
@@ -157,15 +181,40 @@ export function RadicadosPage() {
         current_number: form.current_number,
       };
 
+      let radicadoId = editingId;
+
       if (editingId) {
         const { error } = await supabase.from('radicados').update(payload).eq('id', editingId);
         if (error) throw error;
-        toast.success('Radicado actualizado');
       } else {
-        const { error } = await supabase.from('radicados').insert(payload);
+        const { data, error } = await supabase.from('radicados').insert(payload).select('id').single();
         if (error) throw error;
-        toast.success('Radicado creado');
+        radicadoId = data.id;
       }
+
+      // Save multi-template relationships via RPC (new junction table)
+      if (form.templateIds.length > 0) {
+        try {
+          await supabase.rpc('set_radicado_templates', {
+            p_radicado_id: radicadoId,
+            p_template_ids: form.templateIds,
+          });
+        } catch (rpcErr) {
+          console.warn('⚠️ No se pudieron guardar relaciones multi-plantilla (función no disponible):', rpcErr);
+        }
+      } else {
+        // If no templates selected, clear any existing relationships
+        try {
+          await supabase.rpc('set_radicado_templates', {
+            p_radicado_id: radicadoId,
+            p_template_ids: [],
+          });
+        } catch {
+          // Ignore if function not available
+        }
+      }
+
+      toast.success(editingId ? 'Radicado actualizado' : 'Radicado creado');
       setShowModal(false);
       loadData();
     } catch (err: any) {
@@ -360,16 +409,60 @@ export function RadicadosPage() {
                   </div>
                 </div>
 
-                {/* Template */}
+                {/* Templates (multi-select) */}
                 <div>
-                  <label className="label">Plantilla asociada</label>
-                  <select className="input" value={form.template_id}
-                    onChange={e => setForm({...form, template_id: e.target.value})}>
-                    <option value="">Sin plantilla (uso general)</option>
-                    {templates.map(t => (
-                      <option key={t.id} value={t.id}>{t.name} ({t.code})</option>
-                    ))}
-                  </select>
+                  <label className="label flex items-center gap-1">
+                    <FileText size={14} /> Plantillas asociadas
+                    <span className="text-[10px] text-on-surface-variant/60 font-normal">
+                      ({form.templateIds.length} seleccionadas)
+                    </span>
+                  </label>
+                  <p className="text-xs text-on-surface-variant/60 mb-2">
+                    Selecciona una o más plantillas que compartirán este radicado.
+                  </p>
+                  <div className="max-h-48 overflow-y-auto border border-outline-variant/30 rounded-xl p-2 space-y-1 bg-white/50">
+                    {templates.length === 0 ? (
+                      <p className="text-xs text-on-surface-variant/60 text-center py-3">
+                        No hay plantillas disponibles para esta institución
+                      </p>
+                    ) : (
+                      templates.map(t => {
+                        const isSelected = form.templateIds.includes(t.id);
+                        return (
+                          <label
+                            key={t.id}
+                            className={`flex items-center gap-3 p-2.5 rounded-lg cursor-pointer transition-all text-sm border ${
+                              isSelected
+                                ? 'bg-primary/5 border-primary/30 text-primary'
+                                : 'hover:bg-surface-container-low border-transparent text-on-surface-variant'
+                            }`}
+                          >
+                            <input
+                              type="checkbox"
+                              className="h-4 w-4 rounded border-outline-variant text-primary focus:ring-primary"
+                              checked={isSelected}
+                              onChange={(e) => {
+                                if (e.target.checked) {
+                                  setForm({...form, templateIds: [...form.templateIds, t.id]});
+                                } else {
+                                  setForm({...form, templateIds: form.templateIds.filter(id => id !== t.id)});
+                                }
+                              }}
+                            />
+                            <div className="flex-1 min-w-0">
+                              <p className="font-semibold text-xs leading-tight truncate">{t.name}</p>
+                              <p className="text-[10px] text-on-surface-variant/60 truncate">{t.code}</p>
+                            </div>
+                            {isSelected && (
+                              <span className="text-[10px] bg-primary/10 text-primary px-1.5 py-0.5 rounded-full font-bold shrink-0">
+                                OK
+                              </span>
+                            )}
+                          </label>
+                        );
+                      })
+                    )}
+                  </div>
                 </div>
 
                 <hr className="border-outline-variant/20" />
