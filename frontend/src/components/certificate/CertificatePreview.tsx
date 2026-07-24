@@ -8,6 +8,7 @@ import toast from 'react-hot-toast';
 import jsPDF from 'jspdf';
 import { getPageDimensions, type PageSizeName } from '../../lib/pageSizes';
 import type { TemplateElement } from '../editor/TemplateCanvas';
+import { getRobotoFontData, registerRobotoFonts } from '../../lib/pdfFonts';
 
 interface CertificatePreviewProps {
   requestId: string;
@@ -166,28 +167,29 @@ export const safeJsonParse = (str: string) => { try { return JSON.parse(str); } 
 
 // ── Direct PDF generation (no html2canvas) ──
 
-/** Font family mapping from CSS to jsPDF built-in fonts */
+/** Font family mapping from CSS to jsPDF registered fonts */
 const FONT_MAP: Record<string, string> = {
-  serif: 'times',
-  'times new roman': 'times',
-  georgia: 'times',
-  palatino: 'times',
-  'book antiqua': 'times',
-  sans: 'helvetica',
-  'sans-serif': 'helvetica',
-  arial: 'helvetica',
-  helvetica: 'helvetica',
-  verdana: 'helvetica',
-  tahoma: 'helvetica',
-  'trebuchet ms': 'helvetica',
-  monospace: 'courier',
-  'courier new': 'courier',
-  consolas: 'courier',
+  serif: 'Roboto',
+  'times new roman': 'Roboto',
+  georgia: 'Roboto',
+  palatino: 'Roboto',
+  'book antiqua': 'Roboto',
+  sans: 'Roboto',
+  'sans-serif': 'Roboto',
+  arial: 'Roboto',
+  helvetica: 'Roboto',
+  verdana: 'Roboto',
+  tahoma: 'Roboto',
+  'trebuchet ms': 'Roboto',
+  roboto: 'Roboto',
+  monospace: 'Courier',
+  'courier new': 'Courier',
+  consolas: 'Courier',
 };
 
 function mapFont(fontFamily?: string): string {
-  if (!fontFamily) return 'times';
-  return FONT_MAP[fontFamily.toLowerCase().trim()] || 'times';
+  if (!fontFamily) return 'Roboto';
+  return FONT_MAP[fontFamily.toLowerCase().trim()] || 'Roboto';
 }
 
 function mapFontStyle(bold?: boolean, italic?: boolean): string {
@@ -239,6 +241,15 @@ export async function renderTemplateToPdf(
 ): Promise<jsPDF> {
   const orientation = pageOrientation === 'landscape' ? 'l' : 'p';
   const pdf = new jsPDF(orientation, 'pt', [pageWidth, pageHeight]);
+
+  // ── Register Roboto font (fetched once from Google Fonts CDN) ──
+  try {
+    const fontData = await getRobotoFontData();
+    registerRobotoFonts(pdf, fontData);
+    pdf.setFont('Roboto', 'normal');
+  } catch (e) {
+    console.warn('⚠️ No se pudo cargar Roboto, usando fuente por defecto:', e);
+  }
 
   // ── Match preview CSS constants ──
   const PAD_X = 4;  // preview: padding '2px 4px' → horizontal 4px
@@ -1090,7 +1101,7 @@ export function CertificatePreview({
             fontStyle: el.italic ? 'italic' : 'normal',
             textAlign: el.align || 'left',
             color: el.color || '#191c1e',
-            fontFamily: el.fontFamily || 'serif',
+            fontFamily: el.fontFamily || 'Roboto, serif',
             background: bgStyle,
             border: borderStyle,
             borderRadius: el.type === 'image' ? '4px' : '0',

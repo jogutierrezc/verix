@@ -445,6 +445,7 @@ export function TemplateEditorPage() {
       width: 200, height: 36,
       content: `{{${varKey}}}`,
       fontSize: 14, align: 'center', bold: false, color: '#191c1e',
+      fontFamily: 'Roboto',
       fieldKey: varKey,
     };
     setElements([...elements, newElement]);
