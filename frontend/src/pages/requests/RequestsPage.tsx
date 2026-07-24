@@ -1,17 +1,20 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useAuth } from '../../hooks/useAuth';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { supabase } from '../../lib/supabase';
 import { auditApi, getClientIP } from '../../services/api';
-import { Plus, Search, MoreHorizontal, CheckCircle, XCircle, X, Eye, Download, ChevronDown, ChevronRight, Package, FileText, Loader2 } from 'lucide-react';
+import { Plus, Search, MoreHorizontal, CheckCircle, XCircle, X, Eye, Download, ChevronDown, ChevronRight, Package, FileText, Loader2, Edit, Trash2, AlertTriangle, AlertCircle, Upload, Table } from 'lucide-react';
 import { format } from 'date-fns';
 import toast from 'react-hot-toast';
 import JSZip from 'jszip';
 import { saveAs } from 'file-saver';
+import * as XLSX from 'xlsx';
 import { CertificatePreview, renderTemplateToPdf, fillTemplate, convertDatesInData, safeJsonParse } from '../../components/certificate/CertificatePreview';
 import type { TemplateElement } from '../../components/editor/TemplateCanvas';
 import { getPageDimensions, type PageSizeName } from '../../lib/pageSizes';
 import { SkeletonCard } from '../../components/ui/SkeletonCard';
+
+const EDITABLE_STATUSES = ['DRAFT', 'PENDING', 'IN_REVIEW', 'REJECTED'];
 
 const statusConfig: Record<string, { label: string; color: string; bg: string; borderColor: string }> = {
   DRAFT: { label: 'Borrador', color: 'text-on-surface-variant', bg: 'bg-surface-variant', borderColor: 'border-surface-variant' },
@@ -25,6 +28,7 @@ const statusConfig: Record<string, { label: string; color: string; bg: string; b
 
 export function RequestsPage() {
   const { user } = useAuth();
+  const navigate = useNavigate();
   const [requests, setRequests] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [statusFilter, setStatusFilter] = useState<string>('');
@@ -43,10 +47,62 @@ export function RequestsPage() {
   const [downloadProgress, setDownloadProgress] = useState({ current: 0, total: 0 });
   const [expandedBatches, setExpandedBatches] = useState<Set<string>>(new Set());
 
+  // ── Full batch data cache (loaded on-demand, bypasses pagination) ──
+  const [batchItemsCache, setBatchItemsCache] = useState<Map<string, any[]>>(new Map());
+  const [loadingBatch, setLoadingBatch] = useState<string | null>(null);
+
+  const fetchBatchItems = async (batchId: string): Promise<any[]> => {
+    // Return from cache if already loaded
+    if (batchItemsCache.has(batchId)) return batchItemsCache.get(batchId)!;
+
+    setLoadingBatch(batchId);
+    try {
+      let query = supabase
+        .from('certificate_requests')
+        .select('*, user:users!certificate_requests_user_id_fkey(first_name, last_name, email), template:templates(name)')
+        .eq('batch_id', batchId)
+        .order('row_index', { ascending: true });
+
+      if (user?.role === 'APPLICANT') query = query.eq('user_id', user.id);
+
+      const { data, error } = await query;
+      if (error) throw error;
+
+      const items = data || [];
+      setBatchItemsCache(prev => {
+        const next = new Map(prev);
+        next.set(batchId, items);
+        return next;
+      });
+      return items;
+    } catch (err) {
+      console.error('Error fetching batch items:', err);
+      toast.error('Error al cargar los datos completos del lote');
+      return [];
+    } finally {
+      setLoadingBatch(null);
+    }
+  };
+
+  // ── Delete confirmation ──
+  const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
+  const [deleteConfirmBatchId, setDeleteConfirmBatchId] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
+
+  // ── Batch edit via Excel ──
+  const [showBatchEditModal, setShowBatchEditModal] = useState(false);
+  const [batchEditBatchId, setBatchEditBatchId] = useState<string | null>(null);
+  const [batchEditRequests, setBatchEditRequests] = useState<any[]>([]);
+  const [batchEditExcelData, setBatchEditExcelData] = useState<Record<string, string>[]>([]);
+  const [batchEditExcelColumns, setBatchEditExcelColumns] = useState<string[]>([]);
+  const [batchEditColumnMapping, setBatchEditColumnMapping] = useState<Record<string, string>>({});
+  const [batchEditImporting, setBatchEditImporting] = useState(false);
+  const batchEditFileInputRef = useRef<HTMLInputElement>(null);
+
   // ── Pagination ──
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
   const [totalCount, setTotalCount] = useState(0);
-  const pageSize = 20;
   const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
 
   // ── Debounced search ──
@@ -140,11 +196,12 @@ export function RequestsPage() {
     loadBatchSignatures();
   }, [user?.institution_id]);
 
-  const openBatchModal = (batchId: string) => {
-    const requestsInBatch = requests.filter(req => req.batch_id === batchId);
-    setBatchRequests(requestsInBatch);
+  const openBatchModal = async (batchId: string) => {
+    // Fetch ALL items for this batch (bypasses pagination)
+    const allItems = await fetchBatchItems(batchId);
+    setBatchRequests(allItems);
     setSigningBatchId(batchId);
-    setSigningRequestIds(requestsInBatch.map(req => req.id));
+    setSigningRequestIds(allItems.map(req => req.id));
     setShowBatchModal(true);
     setBatchSelectedSignatureId(batchSignatures.find((sig: any) => sig.is_primary)?.id || batchSignatures[0]?.id || null);
   };
@@ -363,34 +420,271 @@ export function RequestsPage() {
     return Boolean(req.certificate_url && ['APPROVED', 'SIGNED'].includes(req.status));
   };
 
-  // ── Batch grouping ──
-  const groupBatches = useCallback((items: any[]) => {
-    const individualReqs: any[] = [];
-    const batchMap = new Map<string, any[]>();
-
-    for (const req of items) {
-      if (req.batch_id) {
-        const existing = batchMap.get(req.batch_id) || [];
-        existing.push(req);
-        batchMap.set(req.batch_id, existing);
-      } else {
-        individualReqs.push(req);
-      }
+  const toggleBatchExpand = async (batchId: string) => {
+    // If collapsing, just remove from expanded set
+    if (expandedBatches.has(batchId)) {
+      setExpandedBatches(prev => {
+        const next = new Set(prev);
+        next.delete(batchId);
+        return next;
+      });
+      return;
     }
 
-    return { individualReqs, batchMap };
-  }, []);
+    // Fetch ALL items for this batch (bypasses pagination)
+    await fetchBatchItems(batchId);
 
-  const toggleBatchExpand = (batchId: string) => {
+    // Now add to expanded set
     setExpandedBatches(prev => {
       const next = new Set(prev);
-      if (next.has(batchId)) {
-        next.delete(batchId);
-      } else {
-        next.add(batchId);
-      }
+      next.add(batchId);
       return next;
     });
+  };
+
+  // ── Check if a request status is editable by applicant ──
+  const isEditable = (req: any) => {
+    return user?.role === 'APPLICANT' && EDITABLE_STATUSES.includes(req.status);
+  };
+
+  // ── Delete a single request ──
+  const handleDeleteRequest = async (id: string) => {
+    setDeleting(true);
+    try {
+      // Find which batch (if any) this request belongs to, so we can invalidate cache
+      const targetReq = requests.find(r => r.id === id);
+      const affectedBatchId = targetReq?.batch_id;
+
+      const { error } = await supabase.from('certificate_requests').delete().eq('id', id);
+      if (error) throw error;
+
+      // Invalidate batch cache if this was a batch item
+      if (affectedBatchId) {
+        setBatchItemsCache(prev => { const next = new Map(prev); next.delete(affectedBatchId); return next; });
+      }
+
+      // Audit log
+      try {
+        const ip = await getClientIP();
+        await auditApi.log({
+          user_id: user?.id,
+          user_email: user?.email,
+          module: 'requests',
+          action: 'delete',
+          entity_id: id,
+          entity_type: 'certificate_request',
+          ip_address: ip,
+          description: 'Solicitud eliminada por el solicitante',
+        });
+      } catch { /* silent */ }
+
+      toast.success('Solicitud eliminada');
+      setDeleteConfirmId(null);
+      loadRequests();
+    } catch (err: any) {
+      toast.error(err.message || 'Error al eliminar la solicitud');
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  // ── Delete an entire batch ──
+  const handleDeleteBatch = async (batchId: string) => {
+    setDeleting(true);
+    try {
+      const { error } = await supabase.from('certificate_requests').delete().eq('batch_id', batchId);
+      if (error) throw error;
+
+      // Invalidate batch cache
+      setBatchItemsCache(prev => { const next = new Map(prev); next.delete(batchId); return next; });
+
+      // Audit log
+      try {
+        const ip = await getClientIP();
+        await auditApi.log({
+          user_id: user?.id,
+          user_email: user?.email,
+          module: 'requests',
+          action: 'batch_delete',
+          entity_id: batchId,
+          entity_type: 'certificate_request_batch',
+          ip_address: ip,
+          description: 'Lote completo eliminado por el solicitante',
+        });
+      } catch { /* silent */ }
+
+      toast.success('Lote eliminado exitosamente');
+      setDeleteConfirmBatchId(null);
+      loadRequests();
+    } catch (err: any) {
+      toast.error(err.message || 'Error al eliminar el lote');
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  // ── Open batch edit modal (re-upload Excel) ──
+  const openBatchEditModal = async (batchId: string) => {
+    // Fetch ALL items for this batch (bypasses pagination)
+    const allItems = await fetchBatchItems(batchId);
+    setBatchEditBatchId(batchId);
+    setBatchEditRequests(allItems);
+    setBatchEditExcelData([]);
+    setBatchEditExcelColumns([]);
+    setBatchEditColumnMapping({});
+    setShowBatchEditModal(true);
+  };
+
+  // ── Handle Excel file upload for batch edit ──
+  const handleBatchEditFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      try {
+        const data = new Uint8Array(evt.target?.result as ArrayBuffer);
+        const workbook = XLSX.read(data, { type: 'array', cellDates: true });
+        const sheet = workbook.Sheets[workbook.SheetNames[0]];
+        const json = XLSX.utils.sheet_to_json<Record<string, string>>(sheet, { raw: false, defval: '' });
+
+        if (json.length === 0) {
+          toast.error('El archivo Excel está vacío');
+          return;
+        }
+
+        const columns = Object.keys(json[0]);
+        setBatchEditExcelColumns(columns);
+        setBatchEditExcelData(json);
+
+        // Auto-map columns to data keys from the first batch item
+        if (batchEditRequests.length > 0) {
+          const sampleData = batchEditRequests[0]?.data || {};
+          const dataKeys = Object.keys(sampleData);
+          const mapping: Record<string, string> = {};
+          columns.forEach(col => {
+            const match = dataKeys.find(
+              k => k.toLowerCase() === col.toLowerCase().replace(/\s+/g, '_')
+            );
+            if (match) mapping[col] = match;
+          });
+          setBatchEditColumnMapping(mapping);
+        }
+
+        toast.success(`Se cargaron ${json.length} filas desde el Excel`);
+      } catch (err) {
+        toast.error('Error al leer el archivo Excel');
+        console.error(err);
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  };
+
+  // ── Execute batch update from Excel ──
+  const handleBatchEditImport = async () => {
+    if (!batchEditBatchId || batchEditExcelData.length === 0) {
+      toast.error('No hay datos para actualizar');
+      return;
+    }
+
+    setBatchEditImporting(true);
+    try {
+      let updatedCount = 0;
+      for (let i = 0; i < Math.min(batchEditExcelData.length, batchEditRequests.length); i++) {
+        const row = batchEditExcelData[i];
+        const existingReq = batchEditRequests[i];
+
+        const mappedData: Record<string, string> = {};
+        Object.entries(batchEditColumnMapping).forEach(([excelCol, templateVar]) => {
+          if (!templateVar) return;
+          const value = row[excelCol];
+          if (value !== undefined && value !== null && String(value).trim() !== '') {
+            mappedData[templateVar] = String(value);
+          }
+        });
+
+        const { error: updateError } = await supabase
+          .from('certificate_requests')
+          .update({ data: mappedData })
+          .eq('id', existingReq.id);
+
+        if (!updateError) updatedCount++;
+      }
+
+      // Add new rows if Excel has more rows than existing batch
+      if (batchEditExcelData.length > batchEditRequests.length) {
+        const firstReq = batchEditRequests[0];
+        const newRows = [];
+        for (let i = batchEditRequests.length; i < batchEditExcelData.length; i++) {
+          const row = batchEditExcelData[i];
+          const mappedData: Record<string, string> = {};
+          Object.entries(batchEditColumnMapping).forEach(([excelCol, templateVar]) => {
+            if (!templateVar) return;
+            const value = row[excelCol];
+            if (value !== undefined && value !== null && String(value).trim() !== '') {
+              mappedData[templateVar] = String(value);
+            }
+          });
+
+          const code = `MAS-${batchEditBatchId.substring(0, 6).toUpperCase()}-${String(i + 1).padStart(4, '0')}`;
+          newRows.push({
+            code,
+            type: 'MASSIVE',
+            status: 'PENDING',
+            user_id: user?.id,
+            template_id: firstReq?.template_id,
+            data: mappedData,
+            batch_id: batchEditBatchId,
+            batch_total: Math.max(batchEditExcelData.length, batchEditRequests.length),
+            row_index: i,
+          });
+        }
+
+        if (newRows.length > 0) {
+          const { error: insertError } = await supabase.from('certificate_requests').insert(newRows);
+          if (insertError) throw insertError;
+
+          // Update batch_total on all items
+          const newTotal = Math.max(batchEditExcelData.length, batchEditRequests.length);
+          await supabase
+            .from('certificate_requests')
+            .update({ batch_total: newTotal })
+            .eq('batch_id', batchEditBatchId);
+        }
+      }
+
+      // Audit log
+      try {
+        const ip = await getClientIP();
+        await auditApi.log({
+          user_id: user?.id,
+          user_email: user?.email,
+          module: 'requests',
+          action: 'batch_update',
+          entity_id: batchEditBatchId,
+          entity_type: 'certificate_request_batch',
+          ip_address: ip,
+          description: `Lote editado masivamente vía Excel por el solicitante (${updatedCount} actualizadas)`,
+        });
+      } catch { /* silent */ }
+
+      // Invalidate batch cache so re-expand shows fresh data
+      if (batchEditBatchId) {
+        setBatchItemsCache(prev => { const next = new Map(prev); next.delete(batchEditBatchId); return next; });
+      }
+
+      toast.success(`✅ ${updatedCount} solicitudes actualizadas exitosamente`);
+      setShowBatchEditModal(false);
+      setBatchEditBatchId(null);
+      setBatchEditRequests([]);
+      setBatchEditExcelData([]);
+      loadRequests();
+    } catch (err: any) {
+      toast.error(err.message || 'Error al actualizar el lote');
+      console.error('Batch edit error:', err);
+    } finally {
+      setBatchEditImporting(false);
+    }
   };
 
   // ── Download a single request PDF with Firma Electrónica (signature + QR) ──
@@ -573,6 +867,10 @@ export function RequestsPage() {
             id_solicitud: reqCode,
             codigo_verificacion: verificationCode,
             qr_content: validationUrl,
+            ...(req.consecutive_number ? {
+              radicado: req.consecutive_number,
+              consecutivo: req.consecutive_number,
+            } : {}),
             ...(req.batch_id ? {
               lote_id: req.batch_id,
               lote_total: String(req.batch_total || ''),
@@ -648,6 +946,18 @@ export function RequestsPage() {
               <option key={k} value={k}>{v.label}</option>
             ))}
           </select>
+
+          {/* Page size selector */}
+          <select
+            className="input w-auto min-w-[50px] text-sm h-10"
+            value={pageSize}
+            onChange={e => { setPageSize(Number(e.target.value)); setPage(1); }}
+            title="Resultados por página"
+          >
+            <option value={20}>20</option>
+            <option value={50}>50</option>
+            <option value={100}>100</option>
+          </select>
           {(user?.role === 'SIGNER' || user?.role === 'ADMIN') && selectedRequestIds.length > 0 && (
             <button
               onClick={() => openSelectedRequestsModal(selectedRequestIds)}
@@ -685,7 +995,17 @@ export function RequestsPage() {
             <p className="text-body-md text-on-surface-variant/60 mt-1">Las solicitudes aparecerán aquí</p>
           </div>
         ) : (() => {
-          const { individualReqs, batchMap } = groupBatches(filtered);
+          // ── Deduplicate batches: each unique batch_id appears ONCE per page ──
+          const seenBatchIds = new Set<string>();
+          const individualReqs: any[] = [];
+          for (const req of filtered) {
+            if (req.batch_id) {
+              seenBatchIds.add(req.batch_id);
+            } else {
+              individualReqs.push(req);
+            }
+          }
+
           const allItems: any[] = [];
 
           // Add individual (non-batch) requests first
@@ -693,8 +1013,9 @@ export function RequestsPage() {
             allItems.push({ type: 'individual', req });
           }
 
-          // Add batch groups
-          for (const [batchId, batchReqs] of batchMap) {
+          // Add each unique batch ONCE (the paginated subset is just for preview info)
+          for (const batchId of seenBatchIds) {
+            const batchReqs = filtered.filter(req => req.batch_id === batchId);
             allItems.push({ type: 'batch', batchId, batchReqs });
           }
 
@@ -762,9 +1083,7 @@ export function RequestsPage() {
                       {(req.status === 'APPROVED' || req.status === 'SIGNED') && (
                         <>
                           <button
-                            onClick={() => {
-                              setPreviewRequestId(req.id);
-                            }}
+                            onClick={() => setPreviewRequestId(req.id)}
                             className="p-2 hover:bg-primary/10 rounded-full text-primary transition-colors"
                             title="Ver certificado"
                           >
@@ -780,9 +1099,25 @@ export function RequestsPage() {
                           </button>
                         </>
                       )}
-                      <button className="p-2 hover:bg-surface-container-high rounded-full text-on-surface-variant transition-colors">
-                        <MoreHorizontal size={18} />
-                      </button>
+                      {/* Applicant edit/delete actions */}
+                      {isEditable(req) && (
+                        <>
+                          <Link
+                            to={`/requests/edit/${req.id}`}
+                            className="p-2 hover:bg-primary/10 rounded-full text-primary transition-colors"
+                            title="Editar solicitud"
+                          >
+                            <Edit size={18} />
+                          </Link>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); setDeleteConfirmId(deleteConfirmId === req.id ? null : req.id); }}
+                            className="p-2 hover:bg-error/10 rounded-full text-error transition-colors"
+                            title="Eliminar solicitud"
+                          >
+                            <Trash2 size={18} />
+                          </button>
+                        </>
+                      )}
                     </div>
                   </div>
 
@@ -798,6 +1133,36 @@ export function RequestsPage() {
                       </div>
                     </div>
                   )}
+
+                  {/* Delete confirmation */}
+                  {deleteConfirmId === req.id && (
+                    <div className="absolute inset-0 bg-white/95 backdrop-blur-sm rounded-2xl z-10 flex items-center justify-center p-6 animate-fade-in">
+                      <div className="text-center max-w-xs">
+                        <div className="w-12 h-12 rounded-2xl bg-error-container flex items-center justify-center mx-auto mb-3">
+                          <AlertTriangle size={24} className="text-error" />
+                        </div>
+                        <p className="text-sm font-bold text-on-surface mb-1">¿Eliminar solicitud?</p>
+                        <p className="text-xs text-on-surface-variant/70 mb-4">
+                          Esta acción no se puede deshacer. Se eliminará la solicitud <strong className="text-on-surface">{req.code}</strong>.
+                        </p>
+                        <div className="flex gap-2 justify-center">
+                          <button
+                            onClick={() => handleDeleteRequest(req.id)}
+                            disabled={deleting}
+                            className="btn-danger btn-sm px-4"
+                          >
+                            {deleting ? 'Eliminando...' : 'Eliminar'}
+                          </button>
+                          <button
+                            onClick={() => setDeleteConfirmId(null)}
+                            className="btn-secondary btn-sm px-4"
+                          >
+                            Cancelar
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </div>
               );
             }
@@ -805,11 +1170,14 @@ export function RequestsPage() {
             // ── Batch group card ──
             const { batchId, batchReqs } = item;
             const isExpanded = expandedBatches.has(batchId);
-            const approvedCount = batchReqs.filter((r: any) => ['APPROVED', 'SIGNED'].includes(r.status)).length;
-            const pendingCount = batchReqs.filter((r: any) => r.status === 'PENDING').length;
             const firstReq = batchReqs[0];
             const batchCode = firstReq?.code?.substring(0, 10) || batchId.substring(0, 8);
-            const eligibleDownload = batchReqs.filter((r: any) => r.certificate_url && ['APPROVED', 'SIGNED'].includes(r.status));
+            // Use cached full batch items when expanded, otherwise use paginated subset
+            const cachedItems = batchItemsCache.get(batchId) || null;
+            const displayItems = isExpanded && cachedItems ? cachedItems : batchReqs;
+            const realTotal = firstReq?.batch_total || batchReqs.length;
+            const approvedCount = displayItems.filter((r: any) => ['APPROVED', 'SIGNED'].includes(r.status)).length;
+            const pendingCount = displayItems.filter((r: any) => r.status === 'PENDING').length;
 
             return (
               <div key={batchId} className="glass-card rounded-2xl overflow-hidden border border-primary/10 hover:shadow-md transition-all">
@@ -825,7 +1193,7 @@ export function RequestsPage() {
                     <div className="flex items-center gap-2">
                       <span className="font-semibold text-sm text-on-surface">Lote {batchCode}</span>
                       <span className="px-2 py-0.5 bg-secondary/10 text-secondary text-[10px] font-bold rounded-full">
-                        {batchReqs.length} solicitudes
+                        {realTotal} solicitudes
                       </span>
                     </div>
                     <p className="text-xs text-on-surface-variant/70 mt-0.5">
@@ -834,6 +1202,9 @@ export function RequestsPage() {
                     </p>
                   </div>
                   <div className="flex items-center gap-3">
+                    {loadingBatch === batchId && (
+                      <Loader2 size={16} className="animate-spin text-primary shrink-0" />
+                    )}
                     {pendingCount > 0 && (
                       <span className="text-xs text-secondary font-semibold">{pendingCount} pendientes</span>
                     )}
@@ -849,7 +1220,7 @@ export function RequestsPage() {
                 </button>
 
                 {/* Batch actions bar */}
-                <div className="flex items-center gap-2 px-5 pb-3">
+                <div className="flex items-center gap-2 px-5 pb-3 flex-wrap">
                   {/* Sign batch (for signers/admins with pending items) */}
                   {(user?.role === 'SIGNER' || user?.role === 'ADMIN') && pendingCount > 0 && (
                     <>
@@ -859,7 +1230,7 @@ export function RequestsPage() {
                       >
                         <CheckCircle size={14} /> Firmar lote
                       </button>
-                      {batchReqs.filter((r: any) => r.status === 'PENDING').slice(0, 3).map((r: any) => (
+                      {displayItems.filter((r: any) => r.status === 'PENDING').slice(0, 3).map((r: any) => (
                         <button
                           key={r.id}
                           onClick={(e) => { e.stopPropagation(); setPreviewRequestId(r.id); }}
@@ -874,71 +1245,188 @@ export function RequestsPage() {
 
                   {/* Download batch ZIP — always visible */}
                   <button
-                    onClick={(e) => { e.stopPropagation(); downloadBatchAsZip(batchId, batchReqs); }}
+                    onClick={async (e) => {
+                      e.stopPropagation();
+                      // Fetch all batch items before downloading
+                      const allItems = cachedItems || await fetchBatchItems(batchId);
+                      downloadBatchAsZip(batchId, allItems);
+                    }}
                     disabled={downloading}
                     className="btn-secondary btn-xs px-3 py-1.5 text-xs"
                   >
                     {downloading ? (
                       <><Loader2 size={14} className="animate-spin" /> {downloadProgress.current}/{downloadProgress.total}</>
                     ) : (
-                      <><Download size={14} /> Descargar lote ({batchReqs.length})</>
+                      <><Download size={14} /> Descargar lote ({realTotal})</>
                     )}
                   </button>
+
+                  {/* Applicant: edit batch via Excel */}
+                  {user?.role === 'APPLICANT' && displayItems.some((r: any) => EDITABLE_STATUSES.includes(r.status)) && (
+                    <>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); openBatchEditModal(batchId); }}
+                        className="btn-secondary btn-xs px-3 py-1.5 text-xs"
+                      >
+                        <Upload size={14} /> Editar lote
+                      </button>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); setDeleteConfirmBatchId(deleteConfirmBatchId === batchId ? null : batchId); }}
+                        className="p-1.5 hover:bg-error/10 rounded-full text-error transition-colors"
+                        title="Eliminar lote completo"
+                      >
+                        <Trash2 size={16} />
+                      </button>
+                    </>
+                  )}
+
+                  {/* Delete batch confirmation */}
+                  {deleteConfirmBatchId === batchId && (
+                    <div className="w-full mt-2 bg-error-container/30 rounded-xl p-3 flex items-center justify-between gap-3 animate-fade-in">
+                      <div className="flex items-center gap-2 text-xs text-error">
+                        <AlertTriangle size={14} />
+                        <span>¿Eliminar todo el lote ({realTotal} solicitudes)?</span>
+                      </div>
+                      <div className="flex gap-2 shrink-0">
+                        <button
+                          onClick={(e) => { e.stopPropagation(); handleDeleteBatch(batchId); }}
+                          disabled={deleting}
+                          className="btn-danger btn-xs px-2 py-1 text-[10px]"
+                        >
+                          {deleting ? '...' : 'Eliminar'}
+                        </button>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); setDeleteConfirmBatchId(null); }}
+                          className="btn-secondary btn-xs px-2 py-1 text-[10px]"
+                        >
+                          Cancelar
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
 
-                {/* Expanded children */}
+                {/* Expanded children — uses full batch data from cache */}
                 {isExpanded && (
                   <div className="border-t border-outline-variant/10 divide-y divide-outline-variant/5 animate-fade-in">
-                    {batchReqs.map((req: any) => {
-                      const status = statusConfig[req.status] || { label: req.status, color: '', bg: '', borderColor: '' };
-                      return (
-                        <div
-                          key={req.id}
-                          className={`flex items-center gap-3 px-5 py-3 hover:bg-surface-container-low/50 transition-colors border-l-4 ${status.borderColor}`}
-                        >
-                          <div className="flex-1 grid grid-cols-1 md:grid-cols-4 gap-2 text-sm">
-                            <div>
-                              <span className="text-[10px] uppercase tracking-wider text-on-surface-variant/50 font-bold block">Código</span>
-                              <span className="font-mono text-xs font-semibold text-primary">{req.code}</span>
-                            </div>
-                            <div>
-                              <span className="text-[10px] uppercase tracking-wider text-on-surface-variant/50 font-bold block">Estudiante</span>
-                              <span className="text-xs text-on-surface">{getStudentName(req)}</span>
-                            </div>
-                            <div>
-                              <span className="text-[10px] uppercase tracking-wider text-on-surface-variant/50 font-bold block">Documento</span>
-                              <span className="text-xs text-on-surface-variant">{getStudentDocument(req)}</span>
-                            </div>
-                            <div className="flex items-center justify-between gap-2">
-                              <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${status.color} ${status.bg}`}>
-                                {status.label}
-                              </span>
-                              <div className="flex items-center gap-1">
-                                {(req.status === 'APPROVED' || req.status === 'SIGNED') && (
-                                <>
-                                  <button
-                                    onClick={(e) => { e.stopPropagation(); setPreviewRequestId(req.id); }}
-                                    className="p-1.5 hover:bg-primary/10 rounded-full text-primary transition-colors"
-                                    title="Ver certificado"
-                                  >
-                                    <Eye size={15} />
-                                  </button>
-                                  <button
-                                    onClick={(e) => { e.stopPropagation(); downloadSignedPdf(req); }}
-                                    disabled={downloading}
-                                    className="p-1.5 hover:bg-primary/10 rounded-full text-primary transition-colors"
-                                    title="Descargar PDF con Firma Electrónica"
-                                  >
-                                    <Download size={15} />
-                                  </button>
-                                </>
-                              )}
+                    {displayItems.length > 1000 ? (
+                      /* Show summary for very large batches */
+                      <div className="px-5 py-8 text-center text-sm text-on-surface-variant/70">
+                        <Package size={32} className="mx-auto text-secondary/40 mb-3" />
+                        <p className="font-semibold text-on-surface mb-1">Lote de {realTotal} solicitudes</p>
+                        <p className="text-xs">
+                          {approvedCount} aprobadas · {pendingCount} pendientes · {realTotal - approvedCount - pendingCount} otras
+                        </p>
+                        <p className="text-xs mt-3 text-on-surface-variant/50">
+                          Usa la opción <strong>"Editar lote"</strong> para hacer correcciones masivas vía Excel,
+                          o descarga el ZIP completo.
+                        </p>
+                      </div>
+                    ) : (
+                      displayItems.map((req: any) => {
+                        const status = statusConfig[req.status] || { label: req.status, color: '', bg: '', borderColor: '' };
+                        return (
+                          <div key={req.id} className="relative">
+                            <div
+                              className={`flex items-center gap-3 px-5 py-3 hover:bg-surface-container-low/50 transition-colors border-l-4 ${status.borderColor} ${
+                                deleteConfirmId === req.id ? 'opacity-20 pointer-events-none' : ''
+                              }`}
+                            >
+                              <div className="flex-1 grid grid-cols-1 md:grid-cols-4 gap-2 text-sm">
+                                <div>
+                                  <span className="text-[10px] uppercase tracking-wider text-on-surface-variant/50 font-bold block">Código</span>
+                                  <span className="font-mono text-xs font-semibold text-primary">{req.code}</span>
+                                </div>
+                                <div>
+                                  <span className="text-[10px] uppercase tracking-wider text-on-surface-variant/50 font-bold block">Estudiante</span>
+                                  <span className="text-xs text-on-surface">{getStudentName(req)}</span>
+                                </div>
+                                <div>
+                                  <span className="text-[10px] uppercase tracking-wider text-on-surface-variant/50 font-bold block">Documento</span>
+                                  <span className="text-xs text-on-surface-variant">{getStudentDocument(req)}</span>
+                                </div>
+                                <div className="flex items-center justify-between gap-2">
+                                  <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${status.color} ${status.bg}`}>
+                                    {status.label}
+                                  </span>
+                                  <div className="flex items-center gap-1">
+                                    {(req.status === 'APPROVED' || req.status === 'SIGNED') && (
+                                    <>
+                                      <button
+                                        onClick={(e) => { e.stopPropagation(); setPreviewRequestId(req.id); }}
+                                        className="p-1.5 hover:bg-primary/10 rounded-full text-primary transition-colors"
+                                        title="Ver certificado"
+                                      >
+                                        <Eye size={15} />
+                                      </button>
+                                      <button
+                                        onClick={(e) => { e.stopPropagation(); downloadSignedPdf(req); }}
+                                        disabled={downloading}
+                                        className="p-1.5 hover:bg-primary/10 rounded-full text-primary transition-colors"
+                                        title="Descargar PDF con Firma Electrónica"
+                                      >
+                                        <Download size={15} />
+                                      </button>
+                                    </>
+                                  )}
+                                  {/* Applicant: edit individual batch item */}
+                                  {user?.role === 'APPLICANT' && EDITABLE_STATUSES.includes(req.status) && (
+                                    <>
+                                      <Link
+                                        to={`/requests/edit/${req.id}`}
+                                        onClick={(e) => e.stopPropagation()}
+                                        className="p-1.5 hover:bg-primary/10 rounded-full text-primary transition-colors"
+                                        title={`Editar ${req.code}`}
+                                      >
+                                        <Edit size={15} />
+                                      </Link>
+                                      <button
+                                        onClick={(e) => { e.stopPropagation(); setDeleteConfirmId(deleteConfirmId === req.id ? null : req.id); }}
+                                        className="p-1.5 hover:bg-error/10 rounded-full text-error transition-colors"
+                                        title={`Eliminar ${req.code}`}
+                                      >
+                                        <Trash2 size={15} />
+                                      </button>
+                                    </>
+                                  )}
+                                  </div>
+                                </div>
                               </div>
                             </div>
+
+                            {/* Delete confirmation for batch item */}
+                            {deleteConfirmId === req.id && (
+                              <div className="absolute inset-0 z-10 flex items-center justify-center px-5 animate-fade-in">
+                                <div className="flex items-center gap-3 bg-white rounded-xl shadow-lg border border-error/20 px-4 py-2.5">
+                                  <div className="w-8 h-8 rounded-lg bg-error-container flex items-center justify-center shrink-0">
+                                    <AlertTriangle size={16} className="text-error" />
+                                  </div>
+                                  <div className="text-xs">
+                                    <p className="font-bold text-on-surface">¿Eliminar {req.code}?</p>
+                                    <p className="text-on-surface-variant/60 text-[10px]">Esta acción no se puede deshacer</p>
+                                  </div>
+                                  <div className="flex gap-1.5 shrink-0">
+                                    <button
+                                      onClick={(e) => { e.stopPropagation(); handleDeleteRequest(req.id); }}
+                                      disabled={deleting}
+                                      className="btn-danger btn-xs px-2.5 py-1 text-[10px]"
+                                    >
+                                      {deleting ? '...' : 'Eliminar'}
+                                    </button>
+                                    <button
+                                      onClick={(e) => { e.stopPropagation(); setDeleteConfirmId(null); }}
+                                      className="btn-secondary btn-xs px-2.5 py-1 text-[10px]"
+                                    >
+                                      Cancelar
+                                    </button>
+                                  </div>
+                                </div>
+                              </div>
+                            )}
                           </div>
-                        </div>
-                      );
-                    })}
+                        );
+                      })
+                    )}
                   </div>
                 )}
               </div>
@@ -1029,18 +1517,22 @@ export function RequestsPage() {
                   <p className="font-semibold text-on-surface mt-1">{batchRequests.length}</p>
                 </div>
                 <div className="bg-surface-container-low rounded-2xl p-4">
-                  <h3 className="text-sm font-semibold text-on-surface mb-3">Solicitudes en el lote</h3>
-                  <ul className="space-y-2 text-sm">
-                    {batchRequests.slice(0, 6).map((req) => (
-                      <li key={req.id} className="flex items-center justify-between gap-3">
-                        <span className="font-medium truncate">{req.code}</span>
-                        <span className="text-on-surface-variant text-xs">{req.template?.name || 'Sin plantilla'}</span>
-                      </li>
-                    ))}
-                    {batchRequests.length > 6 && (
-                      <li className="text-xs text-on-surface-variant">+{batchRequests.length - 6} más</li>
+                  <h3 className="text-sm font-semibold text-on-surface mb-3">Solicitudes en el lote ({batchRequests.length})</h3>
+                  <div className="max-h-[280px] overflow-y-auto custom-scrollbar space-y-0.5">
+                    {batchRequests.length === 0 ? (
+                      <p className="text-xs text-on-surface-variant/60 text-center py-4">No hay solicitudes en este lote</p>
+                    ) : (
+                      batchRequests.map((req) => (
+                        <div key={req.id} className="flex items-center justify-between gap-2 px-2 py-1.5 rounded-lg hover:bg-white/50 transition-colors">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <span className="font-mono text-[11px] font-semibold text-primary shrink-0">{req.code}</span>
+                            <span className="text-[11px] text-on-surface-variant truncate">{getStudentName(req)}</span>
+                          </div>
+                          <span className="text-[10px] text-on-surface-variant/50 shrink-0">{req.template?.name || ''}</span>
+                        </div>
+                      ))
                     )}
-                  </ul>
+                  </div>
                 </div>
               </div>
 
@@ -1078,6 +1570,182 @@ export function RequestsPage() {
               <button onClick={handleApproveBatch} disabled={batchSigning || batchSignatures.length > 0 && !batchSelectedSignatureId} className="btn-primary px-6 py-3">
                 {batchSigning ? 'Firmando lote...' : 'Firmar lote'}
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Batch Edit Modal (re-upload Excel) ── */}
+      {showBatchEditModal && (
+        <div className="fixed inset-0 z-50 flex items-end md:items-center justify-center bg-black/50 backdrop-blur-sm p-0 md:p-4 animate-fade-in">
+          <div className="bg-white rounded-t-3xl md:rounded-3xl shadow-2xl w-full md:max-w-2xl max-h-[95vh] md:max-h-[90vh] overflow-hidden animate-slide-up md:animate-scale-in">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-outline-variant/20">
+              <div>
+                <h2 className="text-lg font-bold text-on-surface">Editar lote con Excel</h2>
+                <p className="text-sm text-on-surface-variant">
+                  Sube un nuevo archivo Excel para reemplazar los datos del lote ({batchEditRequests.length} solicitudes)
+                </p>
+              </div>
+              <button onClick={() => { setShowBatchEditModal(false); setBatchEditExcelData([]); }} className="p-2 rounded-xl text-on-surface-variant hover:bg-surface-container-high">
+                <X size={20} />
+              </button>
+            </div>
+
+            <div className="p-6 space-y-6 overflow-y-auto max-h-[70vh]">
+              {batchEditExcelData.length === 0 ? (
+                <div className="glass-card p-8 rounded-2xl border border-dashed border-outline-variant/50">
+                  <div className="flex flex-col items-center text-center">
+                    <div className="w-16 h-16 rounded-2xl bg-primary/10 flex items-center justify-center mb-4">
+                      <Upload size={32} className="text-primary" />
+                    </div>
+                    <h3 className="text-lg font-bold text-on-surface mb-1">Reemplazar datos del lote</h3>
+                    <p className="text-sm text-on-surface-variant mb-6 max-w-md">
+                      Sube un archivo Excel (.xlsx o .csv) con los datos actualizados.
+                      Las filas se mapearán por orden a las solicitudes existentes.
+                    </p>
+
+                    <input
+                      ref={batchEditFileInputRef}
+                      type="file"
+                      accept=".xlsx,.xls,.csv"
+                      onChange={handleBatchEditFileUpload}
+                      className="hidden"
+                    />
+                    <button
+                      onClick={() => batchEditFileInputRef.current?.click()}
+                      className="btn-primary px-8 py-3"
+                    >
+                      <Upload size={18} /> Seleccionar archivo
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {/* Column mapping */}
+                  {batchEditExcelColumns.length > 0 && batchEditRequests[0]?.data && (
+                    <div className="glass-card p-5 rounded-2xl space-y-3 border border-white/40">
+                      <h3 className="text-sm font-bold text-on-surface-variant uppercase tracking-wider flex items-center gap-2">
+                        <AlertCircle size={14} />
+                        Mapeo de columnas
+                      </h3>
+                      <p className="text-xs text-on-surface-variant/60">
+                        Relaciona las columnas del Excel con los campos del lote
+                      </p>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                        {batchEditExcelColumns.map(col => {
+                          const dataKeys = Object.keys(batchEditRequests[0]?.data || {});
+                          return (
+                            <div key={col} className="flex items-center gap-2 bg-surface-container-low rounded-lg px-3 py-2.5">
+                              <span className="text-sm font-medium text-on-surface w-1/3 truncate">{col}</span>
+                              <span className="text-on-surface-variant/40">&rarr;</span>
+                              <select
+                                className="text-sm bg-white border border-outline-variant/30 rounded-lg px-2 py-1.5 flex-1"
+                                value={batchEditColumnMapping[col] || ''}
+                                onChange={e => setBatchEditColumnMapping({ ...batchEditColumnMapping, [col]: e.target.value })}
+                              >
+                                <option value="">No importar</option>
+                                {dataKeys.map(k => (
+                                  <option key={k} value={k}>{k.replace(/_/g, ' ')}</option>
+                                ))}
+                              </select>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Preview table */}
+                  <div className="glass-card rounded-2xl overflow-hidden border border-white/40">
+                    <div className="flex items-center justify-between px-5 py-4 border-b border-outline-variant/10">
+                      <div className="flex items-center gap-2">
+                        <Table size={18} className="text-primary" />
+                        <span className="font-semibold text-sm text-on-surface">
+                          Vista previa ({batchEditExcelData.length} filas)
+                        </span>
+                      </div>
+                      <button
+                        onClick={() => {
+                          setBatchEditExcelData([]);
+                          setBatchEditExcelColumns([]);
+                          setBatchEditColumnMapping({});
+                          if (batchEditFileInputRef.current) batchEditFileInputRef.current.value = '';
+                        }}
+                        className="text-xs text-error hover:underline"
+                      >
+                        Cambiar archivo
+                      </button>
+                    </div>
+                    <div className="overflow-x-auto max-h-64 overflow-y-auto">
+                      <table className="w-full text-sm">
+                        <thead>
+                          <tr className="bg-surface-container-low/50">
+                            {batchEditExcelColumns.map(col => (
+                              <th key={col} className="text-left px-4 py-3 text-xs font-bold text-on-surface-variant uppercase whitespace-nowrap">
+                                {col}
+                              </th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-outline-variant/10">
+                          {batchEditExcelData.slice(0, 15).map((row, i) => (
+                            <tr key={i} className="hover:bg-primary/[0.02]">
+                              {batchEditExcelColumns.map(col => (
+                                <td key={col} className="px-4 py-2.5 text-sm text-on-surface-variant truncate max-w-[200px]">
+                                  {row[col] || <span className="text-on-surface-variant/30">—</span>}
+                                </td>
+                              ))}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    {batchEditExcelData.length > 15 && (
+                      <div className="px-5 py-3 text-xs text-center text-on-surface-variant/50 bg-surface-container-low/30">
+                        Mostrando 15 de {batchEditExcelData.length} filas
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Progress */}
+                  {batchEditImporting && (
+                    <div className="glass-card p-5 rounded-2xl border border-primary/20">
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-sm font-semibold text-on-surface">Actualizando...</span>
+                        <span className="text-sm text-on-surface-variant">{batchEditExcelData.length} solicitudes</span>
+                      </div>
+                      <div className="w-full bg-surface-container rounded-full h-2 overflow-hidden">
+                        <div className="bg-primary h-full rounded-full animate-pulse" style={{ width: '60%' }} />
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            <div className="flex items-center justify-end gap-3 px-6 py-4 border-t border-outline-variant/20">
+              <button
+                onClick={() => { setShowBatchEditModal(false); setBatchEditExcelData([]); }}
+                className="btn-secondary px-6 py-3"
+              >
+                Cancelar
+              </button>
+              {batchEditExcelData.length > 0 && (
+                <button
+                  onClick={handleBatchEditImport}
+                  disabled={batchEditImporting}
+                  className="btn-primary px-8 py-3"
+                >
+                  {batchEditImporting ? (
+                    <span className="flex items-center gap-2">
+                      <span className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                      Actualizando...
+                    </span>
+                  ) : (
+                    <><Upload size={18} /> Actualizar {batchEditExcelData.length} solicitudes</>
+                  )}
+                </button>
+              )}
             </div>
           </div>
         </div>

@@ -41,6 +41,8 @@ export const STORAGE = {
     P12_CERTIFICATES: (userId: string) => `p12-certificates/${userId}`,
     /** Logos institucionales: institution-logos/{instId}/{file} */
     INSTITUTION_LOGOS: (instId: string) => `institution-logos/${instId}`,
+    /** Firmas de actas: minute-signatures/{minuteId}/{recipientId}/{file} */
+    MINUTE_SIGNATURES: (minuteId: string, recipientId: string) => `minute-signatures/${minuteId}/${recipientId}`,
   },
   /** Límite: 50MB */
   MAX_FILE_SIZE: 50 * 1024 * 1024,

@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo, useCallback } from 'react';
 import { useAuth } from '../../hooks/useAuth';
 import { Link } from 'react-router-dom';
 import { supabase } from '../../lib/supabase';
-import { FileText, CheckCircle, XCircle, Clock, Plus, TrendingUp, TrendingDown, Building2, Activity } from 'lucide-react';
+import { FileText, CheckCircle, XCircle, Clock, Plus, TrendingUp, TrendingDown, Building2, Activity, Layout } from 'lucide-react';
 import { format, subWeeks, subMonths, eachDayOfInterval, eachWeekOfInterval, eachMonthOfInterval, differenceInHours } from 'date-fns';
 import { es } from 'date-fns/locale';
 import { SkeletonCard } from '../../components/ui/SkeletonCard';
@@ -147,7 +147,7 @@ export function DashboardPage() {
       // 1. Fetch all requests (filtered by role)
       let query = supabase
         .from('certificate_requests')
-        .select('id, code, status, created_at, reviewed_at, user_id, template_id, verification_code, certificate_url, user:users!certificate_requests_user_id_fkey(id, first_name, last_name, dependency_id, dependency:dependencies(name))')
+        .select('id, code, status, created_at, reviewed_at, user_id, template_id, verification_code, certificate_url, template:templates(name), user:users!certificate_requests_user_id_fkey(id, first_name, last_name, dependency_id, dependency:dependencies(name))')
         .order('created_at', { ascending: false });
 
       if (isApplicant) {
@@ -367,6 +367,67 @@ export function DashboardPage() {
     chartData.push({ year: currentYear + 1, actual: 0, projected: projectedNextYear });
 
     return { nextYear: projectedNextYear, growth, data: chartData };
+  }, [allRequests]);
+
+  // ── Template usage stats ──
+  const templateStats = useMemo(() => {
+    const counts: Record<string, { count: number; approved: number; rejected: number; pending: number }> = {};
+    const now = new Date();
+    const startDate = subMonths(now, periodConfig.months);
+    const filtered = allRequests.filter(r => new Date(r.created_at) >= startDate);
+
+    for (const r of filtered) {
+      const name = r.template?.name || 'Sin plantilla';
+      if (!counts[name]) counts[name] = { count: 0, approved: 0, rejected: 0, pending: 0 };
+      counts[name].count++;
+      if (r.status === 'APPROVED' || r.status === 'SIGNED') counts[name].approved++;
+      else if (r.status === 'REJECTED') counts[name].rejected++;
+      else counts[name].pending++;
+    }
+
+    return Object.entries(counts)
+      .map(([name, st]) => ({
+        name,
+        count: st.count,
+        approved: st.approved,
+        rejected: st.rejected,
+        pending: st.pending,
+        approvalRate: st.count > 0 ? Math.round((st.approved / st.count) * 100) : 0,
+      }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 10);
+  }, [allRequests, period, periodConfig]);
+
+  // ── Template annual projection ──
+  const templateProjection = useMemo(() => {
+    // Group by template + year
+    const yearTemplate: Record<string, Record<number, number>> = {};
+    const currentYear = new Date().getFullYear();
+
+    for (const r of allRequests) {
+      const d = new Date(r.created_at);
+      const year = d.getFullYear();
+      // Only last 2 years + current year
+      if (year < currentYear - 1) continue;
+      const name = r.template?.name || 'Sin plantilla';
+      if (!yearTemplate[name]) yearTemplate[name] = {};
+      yearTemplate[name][year] = (yearTemplate[name][year] || 0) + 1;
+    }
+
+    // Calculate growth rate and project next year
+    const projections = Object.entries(yearTemplate)
+      .filter(([name]) => name !== 'Sin plantilla')
+      .map(([name, years]) => {
+        const lastYear = years[currentYear - 1] || 0;
+        const thisYear = years[currentYear] || 0;
+        const growth = lastYear > 0 ? Math.round(((thisYear - lastYear) / lastYear) * 100) : 0;
+        const projected = Math.max(0, Math.round(thisYear * (1 + (growth / 100))));
+        return { name, lastYear, thisYear, projected, growth };
+      })
+      .sort((a, b) => b.thisYear - a.thisYear)
+      .slice(0, 8);
+
+    return projections;
   }, [allRequests]);
 
   // ── Status display config ──
@@ -620,6 +681,105 @@ export function DashboardPage() {
                     {projection.growth > 0 ? '+' : ''}{projection.growth}%
                   </p>
                 </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Row 3: Template usage stats */}
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+            {/* Template usage frequency - horizontal bar chart */}
+            <div className="glass-card p-5 rounded-2xl lg:col-span-2">
+              <h3 className="text-sm font-bold text-on-surface mb-1 flex items-center gap-2">
+                <Layout size={14} className="text-primary" />
+                Uso de plantillas
+              </h3>
+              <p className="text-[11px] text-on-surface-variant/60 mb-4">Frecuencia de uso por tipo de plantilla en el período</p>
+              <div className="h-[280px]">
+                {templateStats.length > 0 ? (
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={templateStats} layout="vertical" margin={{ left: 10, right: 30, bottom: 10 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#e6e8ea" horizontal={false} />
+                      <XAxis type="number" tick={{ fontSize: 10, fill: '#565e74' }} />
+                      <YAxis dataKey="name" type="category" tick={{ fontSize: 10, fill: '#565e74' }} width={120} />
+                      <Tooltip content={<ChartTooltip />} />
+                      <Bar dataKey="approved" name="Aprobadas" fill={COLORS.primaryLight} radius={[0, 4, 4, 0]} stackId="a" />
+                      <Bar dataKey="pending" name="Pendientes" fill={COLORS.secondary} radius={[0, 4, 4, 0]} stackId="a" />
+                      <Bar dataKey="rejected" name="Rechazadas" fill={COLORS.error} radius={[0, 4, 4, 0]} stackId="a" />
+                      <Legend wrapperStyle={{ fontSize: 11 }} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                ) : (
+                  <div className="flex items-center justify-center h-full text-xs text-on-surface-variant/60">
+                    Sin datos de plantillas en el período
+                  </div>
+                )}
+              </div>
+              {templateStats.length > 0 && (
+                <div className="flex flex-wrap gap-x-4 gap-y-1 mt-2 text-[11px] text-on-surface-variant">
+                  <span className="flex items-center gap-1">
+                    <span className="w-2 h-2 rounded-full" style={{ backgroundColor: COLORS.primary }} />
+                    <strong className="text-on-surface">{templateStats.reduce((s, t) => s + t.count, 0)}</strong> total
+                  </span>
+                  <span className="flex items-center gap-1">
+                    <span className="w-2 h-2 rounded-full" style={{ backgroundColor: COLORS.primaryLight }} />
+                    <strong className="text-on-surface">{templateStats.reduce((s, t) => s + t.approved, 0)}</strong> aprobadas
+                  </span>
+                  <span className="flex items-center gap-1">
+                    <span className="w-2 h-2 rounded-full" style={{ backgroundColor: COLORS.secondary }} />
+                    <strong className="text-on-surface">{templateStats.reduce((s, t) => s + t.pending, 0)}</strong> pendientes
+                  </span>
+                  <span className="flex items-center gap-1">
+                    <span className="w-2 h-2 rounded-full" style={{ backgroundColor: COLORS.error }} />
+                    <strong className="text-on-surface">{templateStats.reduce((s, t) => s + t.rejected, 0)}</strong> rechazadas
+                  </span>
+                </div>
+              )}
+            </div>
+
+            {/* Template annual projection */}
+            <div className="glass-card p-5 rounded-2xl">
+              <h3 className="text-sm font-bold text-on-surface mb-1 flex items-center gap-2">
+                <TrendingUp size={14} className="text-primary" />
+                Prospectiva por plantilla
+              </h3>
+              <p className="text-[11px] text-on-surface-variant/60 mb-4">Proyección anual por tipo de plantilla</p>
+              <div className="space-y-3 max-h-[280px] overflow-y-auto custom-scrollbar pr-1">
+                {templateProjection.length > 0 ? (
+                  templateProjection.map(t => (
+                    <div key={t.name} className="flex items-center gap-3 p-2.5 rounded-xl hover:bg-surface-container-low transition-colors">
+                      <div className="flex-1 min-w-0">
+                        <p className="text-xs font-semibold text-on-surface truncate" title={t.name}>{t.name}</p>
+                        <div className="flex items-center gap-2 mt-1.5">
+                          {/* Mini bar showing this year vs projected */}
+                          <div className="flex-1 h-2 bg-surface-variant rounded-full overflow-hidden">
+                            <div className="h-full rounded-full" style={{
+                              width: `${Math.min(100, (t.thisYear / Math.max(t.projected, 1)) * 100)}%`,
+                              backgroundColor: COLORS.primary,
+                            }} />
+                          </div>
+                          <span className="text-[10px] font-mono font-bold text-on-surface w-6 text-right">
+                            {t.thisYear}
+                          </span>
+                          <span className="text-[10px] font-mono text-on-surface-variant/60">→</span>
+                          <span className="text-[10px] font-mono font-bold text-secondary w-6">
+                            {t.projected}
+                          </span>
+                        </div>
+                      </div>
+                      {t.growth !== 0 && (
+                        <div className={`shrink-0 text-[10px] font-bold px-1.5 py-0.5 rounded-full ${
+                          t.growth > 0 ? 'text-primary bg-primary/10' : 'text-error bg-error-container'
+                        }`}>
+                          {t.growth > 0 ? '+' : ''}{t.growth}%
+                        </div>
+                      )}
+                    </div>
+                  ))
+                ) : (
+                  <div className="flex items-center justify-center h-32 text-xs text-on-surface-variant/60">
+                    Sin datos históricos suficientes
+                  </div>
+                )}
               </div>
             </div>
           </div>

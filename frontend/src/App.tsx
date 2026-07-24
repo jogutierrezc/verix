@@ -14,6 +14,9 @@ import { AuditPage } from './pages/audit/AuditPage';
 import { SettingsPage } from './pages/settings/SettingsPage';
 import { ValidationPage } from './pages/validation/ValidationPage';
 import { ValidateHomePage } from './pages/validation/ValidateHomePage';
+import { ReportsPage } from './pages/reports/ReportsPage';
+import { SignMinutePage } from './pages/minutes/SignMinutePage';
+import { MinutesPage } from './pages/minutes/MinutesPage';
 import { LoadingScreen } from './components/ui/LoadingScreen';
 
 function PrivateRoute({ children, roles }: { children: React.ReactNode; roles?: string[] }) {
@@ -49,6 +52,15 @@ export default function App() {
 
       <Route
         path="/requests/new"
+        element={
+          <PrivateRoute>
+            <CreateRequestPage />
+          </PrivateRoute>
+        }
+      />
+
+      <Route
+        path="/requests/edit/:id"
         element={
           <PrivateRoute>
             <CreateRequestPage />
@@ -120,6 +132,24 @@ export default function App() {
       />
 
       <Route
+        path="/reports"
+        element={
+          <PrivateRoute>
+            <ReportsPage />
+          </PrivateRoute>
+        }
+      />
+
+      <Route
+        path="/minutes"
+        element={
+          <PrivateRoute>
+            <MinutesPage />
+          </PrivateRoute>
+        }
+      />
+
+      <Route
         path="/settings"
         element={
           <PrivateRoute>
@@ -131,6 +161,7 @@ export default function App() {
       {/* Public routes — no auth required */}
       <Route path="/validate" element={<ValidateHomePage />} />
       <Route path="/validate/:code" element={<ValidationPage />} />
+      <Route path="/sign/:token" element={<SignMinutePage />} />
 
       <Route path="/" element={<Navigate to="/dashboard" replace />} />
       <Route path="*" element={<Navigate to="/dashboard" replace />} />

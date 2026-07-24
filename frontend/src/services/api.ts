@@ -335,6 +335,33 @@ export const requestsApi = {
     return data;
   },
 
+  remove: async (id: string) => {
+    const { error } = await supabase
+      .from('certificate_requests')
+      .delete()
+      .eq('id', id);
+    if (error) throw error;
+  },
+
+  removeBatch: async (batchId: string) => {
+    const { error } = await supabase
+      .from('certificate_requests')
+      .delete()
+      .eq('batch_id', batchId);
+    if (error) throw error;
+  },
+
+  updateBatchData: async (batchId: string, updates: { id: string; data: Record<string, string> }[]) => {
+    // Update each request in a batch individually
+    for (const item of updates) {
+      const { error } = await supabase
+        .from('certificate_requests')
+        .update({ data: item.data })
+        .eq('id', item.id);
+      if (error) throw error;
+    }
+  },
+
   download: async (id: string) => {
     const { data, error } = await supabase
       .from('certificate_requests')

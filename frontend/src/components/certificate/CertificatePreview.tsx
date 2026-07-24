@@ -328,6 +328,7 @@ export async function renderTemplateToPdf(
 
         // Determine X position based on alignment
         let textX: number;
+        // 'justify' is not a jsPDF native align, so we handle it manually below
         const textAlign: 'left' | 'center' | 'right' = align === 'justify' ? 'left' : align;
         if (align === 'center') {
           textX = x + w / 2;
@@ -340,12 +341,44 @@ export async function renderTemplateToPdf(
 
         // Render each line with proper spacing (matches preview's lineHeight: 1.2)
         if (lines.length > 0) {
-          for (const line of lines) {
-            pdf.text(line, textX, textY, {
-              maxWidth: maxTextWidth,
-              align: textAlign,
-              baseline: 'top',
-            });
+          for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
+            const line = lines[lineIdx];
+
+            if (align === 'justify' && lineIdx < lines.length - 1) {
+              // ── Justified text: distribute extra space between words ──
+              const words = line.split(' ');
+              if (words.length > 1) {
+                // Calculate total width of all words without spaces
+                let wordsWidth = 0;
+                for (const word of words) {
+                  wordsWidth += pdf.getTextWidth(word);
+                }
+                // Calculate the gap to add between each word to fill the full width
+                const totalGap = maxTextWidth - wordsWidth;
+                const gapBetween = words.length > 1 ? totalGap / (words.length - 1) : 0;
+
+                let currentX = textX;
+                for (let wIdx = 0; wIdx < words.length; wIdx++) {
+                  pdf.text(words[wIdx], currentX, textY, { baseline: 'top' });
+                  if (wIdx < words.length - 1) {
+                    currentX += pdf.getTextWidth(words[wIdx]) + gapBetween;
+                  }
+                }
+              } else {
+                // Single word — just render left-aligned
+                pdf.text(line, textX, textY, { baseline: 'top' });
+              }
+            } else if (align === 'justify' && lineIdx === lines.length - 1) {
+              // Last line of a justified paragraph: left-aligned (no extra spacing)
+              pdf.text(line, textX, textY, { baseline: 'top' });
+            } else {
+              pdf.text(line, textX, textY, {
+                maxWidth: maxTextWidth,
+                align: textAlign,
+                baseline: 'top',
+              });
+            }
+
             textY += fontSize * LINE_HEIGHT;
           }
         }

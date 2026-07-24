@@ -3,12 +3,14 @@ import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../../hooks/useAuth';
 import {
   LayoutDashboard, FileText, FileSpreadsheet, Users, Building2,
-  ClipboardList, Settings, LogOut, Menu, Bell, X, Hash,
+  ClipboardList, Settings, LogOut, Menu, Bell, X, Hash, BarChart3, FileSignature,
 } from 'lucide-react';
 
 const adminLinks = [
   { to: '/dashboard', icon: LayoutDashboard, label: 'Dashboard' },
   { to: '/requests', icon: FileText, label: 'Solicitudes' },
+  { to: '/minutes', icon: FileSignature, label: 'Actas' },
+  { to: '/reports', icon: BarChart3, label: 'Reportes' },
   { to: '/templates', icon: FileSpreadsheet, label: 'Plantillas' },
   { to: '/radicados', icon: Hash, label: 'Radicados' },
   { to: '/users', icon: Users, label: 'Usuarios' },
@@ -20,20 +22,25 @@ const adminLinks = [
 const signerLinks = [
   { to: '/dashboard', icon: LayoutDashboard, label: 'Dashboard' },
   { to: '/requests', icon: FileText, label: 'Solicitudes' },
+  { to: '/minutes', icon: FileSignature, label: 'Actas' },
+  { to: '/reports', icon: BarChart3, label: 'Reportes' },
   { to: '/settings', icon: Settings, label: 'Configuración' },
 ];
 
 const applicantLinks = [
   { to: '/dashboard', icon: LayoutDashboard, label: 'Dashboard' },
   { to: '/requests', icon: FileText, label: 'Mis Solicitudes' },
+  { to: '/minutes', icon: FileSignature, label: 'Actas' },
+  { to: '/reports', icon: BarChart3, label: 'Reportes' },
   { to: '/settings', icon: Settings, label: 'Configuración' },
 ];
 
 const mobileLinks = [
   { to: '/dashboard', icon: LayoutDashboard, label: 'Inicio' },
   { to: '/requests', icon: FileText, label: 'Solicitudes' },
+  { to: '/minutes', icon: FileSignature, label: 'Actas' },
+  { to: '/reports', icon: BarChart3, label: 'Reportes' },
   { to: '/settings', icon: Settings, label: 'Configuración' },
-  { to: '/templates', icon: FileSpreadsheet, label: 'Más' },
 ];
 
 export function Layout({ children }: { children: React.ReactNode }) {
