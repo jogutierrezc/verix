@@ -30,17 +30,19 @@ function titleCase(str: string): string {
   return str.replace(/\b[a-z]/g, c => c.toUpperCase());
 }
 
-// ── Spanish number to words (no accents, matching user's style) ──
+// ── Spanish number to words (with accents) ──
 const UNITS = ['cero', 'uno', 'dos', 'tres', 'cuatro', 'cinco', 'seis', 'siete', 'ocho', 'nueve'];
-const TEENS = ['diez', 'once', 'doce', 'trece', 'catorce', 'quince', 'dieciseis', 'diecisiete', 'dieciocho', 'diecinueve'];
+const TEENS = ['diez', 'once', 'doce', 'trece', 'catorce', 'quince', 'dieciséis', 'diecisiete', 'dieciocho', 'diecinueve'];
 const TENS = ['veinte', 'treinta', 'cuarenta', 'cincuenta', 'sesenta', 'setenta', 'ochenta', 'noventa'];
+// 21-29: compound words with graphic accents where needed
+const VEINTI = ['veintiuno', 'veintidós', 'veintitrés', 'veinticuatro', 'veinticinco', 'veintiséis', 'veintisiete', 'veintiocho', 'veintinueve'];
 
 function numberToSpanishWords(n: number): string {
   if (n < 10) return UNITS[n];
   if (n < 20) return TEENS[n - 10];
   if (n < 30) {
     if (n === 20) return 'veinte';
-    return 'veinti' + UNITS[n - 20];
+    return VEINTI[n - 21];
   }
   if (n < 100) {
     const ten = Math.floor(n / 10);
@@ -76,24 +78,38 @@ function numberToSpanishWords(n: number): string {
 /**
  * Converts a date string to full Spanish text format with numbers in words.
  * Supports:
- *   - DD/MM/AAAA  → "Dos (02) de Junio de Dos Mil Veintiseis"
- *   - AAAA-MM-DD  → "Dos (02) de Junio de Dos Mil Veintiseis"
+ *   - DD/MM/AAAA  → "Diecisiete (17) de Junio de Dos Mil Veintiséis"
+ *   - MM/DD/AAAA  → "Diecisiete (17) de Junio de Dos Mil Veintiséis"
+ *   - AAAA-MM-DD  → "Diecisiete (17) de Junio de Dos Mil Veintiséis"
  *   - Any other format → returned as-is
  */
 function formatDateToSpanish(dateStr: string): string {
-  // Try DD/MM/AAAA first
+  // Try DD/MM/AAAA or MM/DD/AAAA
   let match = dateStr.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
   if (match) {
-    const dayStr = match[1];
-    const month = parseInt(match[2], 10);
+    const first = parseInt(match[1], 10);
+    const second = parseInt(match[2], 10);
     const yearStr = match[3];
-    if (month >= 1 && month <= 12) {
-      const dayNum = parseInt(dayStr, 10);
-      const yearNum = parseInt(yearStr, 10);
-      const dayWords = titleCase(numberToSpanishWords(dayNum));
-      const yearWords = titleCase(numberToSpanishWords(yearNum));
-      return `${dayWords} (${dayStr}) de ${MONTHS_CAPITALIZED[month - 1]} de ${yearWords}`;
+
+    // Determine whether it's DD/MM or MM/DD
+    let dayStr: string, monthNum: number;
+    if (second >= 1 && second <= 12) {
+      // DD/MM/AAAA (second group is month, valid 1-12)
+      dayStr = match[1];
+      monthNum = second;
+    } else if (first >= 1 && first <= 12) {
+      // MM/DD/AAAA (first group is month, valid 1-12, since second > 12)
+      dayStr = match[2];
+      monthNum = first;
+    } else {
+      return dateStr; // Neither is a valid month
     }
+
+    const dayNum = parseInt(dayStr, 10);
+    const yearNum = parseInt(yearStr, 10);
+    const dayWords = titleCase(numberToSpanishWords(dayNum));
+    const yearWords = titleCase(numberToSpanishWords(yearNum));
+    return `${dayWords} (${dayStr}) de ${MONTHS_CAPITALIZED[monthNum - 1]} de ${yearWords}`;
   }
 
   // Try YYYY-MM-DD (from <input type="date">)
