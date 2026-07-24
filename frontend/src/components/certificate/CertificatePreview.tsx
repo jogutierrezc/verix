@@ -137,7 +137,11 @@ export function convertDatesInData(data: Record<string, any>): Record<string, an
     if (typeof value === 'string') {
       // Check for DD/MM/AAAA or YYYY-MM-DD patterns
       if (/\d{1,2}\/\d{1,2}\/\d{4}/.test(value) || /^\d{4}-\d{1,2}-\d{1,2}$/.test(value)) {
-        result[key] = formatDateToSpanish(value);
+        const converted = formatDateToSpanish(value);
+        if (converted !== value) {
+          console.log(`📅 convertDatesInData: "${value}" → "${converted}"`);
+        }
+        result[key] = converted;
       } else {
         result[key] = value;
       }
