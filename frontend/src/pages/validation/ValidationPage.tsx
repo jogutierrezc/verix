@@ -224,42 +224,29 @@ export function ValidationPage() {
     try {
       let data: any = null;
 
-      // Strategy 1: Try RPC functions (SECURITY DEFINER, bypasses RLS)
-      const rpcFunctions = [
-        { name: 'get_certificate_for_validation', params: { p_code: code } },
-        { name: 'get_certificate_for_validation_by_radicado', params: { p_radicado: code } },
-        { name: 'get_certificate_for_validation_by_code', params: { p_code: code } },
-      ];
+      // Llamar a la RPC function pública (SECURITY DEFINER, bypasses RLS)
+      const { data: rpcData, error: rpcError } = await supabase
+        .rpc('get_certificate_for_validation', { p_code: code });
 
-      for (const fn of rpcFunctions) {
-        try {
-          const { data: rpcData, error: rpcError } = await supabase.rpc(fn.name, fn.params);
-          if (rpcData && !rpcError) {
-            data = rpcData;
-            break;
-          }
-        } catch {
-          // Function not found — continue
-        }
+      if (rpcError) {
+        console.warn('RPC falló, intentando consulta directa:', rpcError);
+      } else if (rpcData) {
+        data = typeof rpcData === 'string' ? JSON.parse(rpcData) : rpcData;
       }
 
-      // Strategy 2: Direct query (works if user is authenticated)
+      // Fallback: consulta directa (funciona si el usuario está autenticado)
       if (!data) {
-        try {
-          const { data: directData } = await supabase
-            .from('certificate_requests')
-            .select('*, user:users!certificate_requests_user_id_fkey(first_name, last_name, document_id)')
-            .or(`code.eq.${code},consecutive_number.eq.${code},verification_code.eq.${code}`)
-            .maybeSingle();
+        const { data: directData } = await supabase
+          .from('certificate_requests')
+          .select('*, user:users!certificate_requests_user_id_fkey(first_name, last_name, document_id)')
+          .or(`code.eq.${code},consecutive_number.eq.${code},verification_code.eq.${code}`)
+          .maybeSingle();
 
-          if (directData) {
-            data = {
-              ...directData,
-              user: directData.user || { first_name: '', last_name: '' },
-            };
-          }
-        } catch {
-          // Direct query failed — continue
+        if (directData) {
+          data = {
+            ...directData,
+            user: directData.user || { first_name: '', last_name: '' },
+          };
         }
       }
 

@@ -432,52 +432,63 @@ export async function renderTemplateToPdf(
           for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
             const line = lines[lineIdx];
 
-            if (align === 'justify' && lineIdx < lines.length - 1) {
-              // ── Justified text: distribute extra space between words ──
-              const words = line.split(' ');
-              if (words.length > 1) {
-                // Calculate total width of all words without spaces
-                let wordsWidth = 0;
-                for (const word of words) {
-                  wordsWidth += pdf.getTextWidth(word);
-                }
-                // Calculate the gap to add between each word to fill the full width
-                const totalGap = maxTextWidth - wordsWidth;
-                let gapBetween = words.length > 1 ? totalGap / (words.length - 1) : 0;
+            if (align === 'justify') {
+              const isLastLine = lineIdx === lines.length - 1;
+              const isSingleLine = lines.length === 1;
 
-                // ── Constrain gap to preserve design layout ──
-                const normalSpace = pdf.getTextWidth(' ');
-                const MIN_GAP = normalSpace * 0.5;    // At least half a normal space
-                const MAX_GAP = Math.max(fontSize * 0.6, normalSpace * 2);  // At most 60% of font size, but at least 2x normal space
-
-                if (gapBetween < MIN_GAP) {
-                  gapBetween = MIN_GAP;
-                  // Check if forced gap causes overflow → fall back to left-aligned
-                  const newTotalWidth = wordsWidth + gapBetween * (words.length - 1);
-                  if (newTotalWidth > maxTextWidth) {
-                    pdf.text(line, textX, textY, { baseline: 'top' });
-                    gapBetween = -1; // signal to skip rendering below
-                  }
-                }
-                if (gapBetween > MAX_GAP) {
-                  // Gap too large — fall back to left-aligned so text doesn't look stretched
-                  pdf.text(line, textX, textY, { baseline: 'top' });
-                } else {
-                  let currentX = textX;
-                  for (let wIdx = 0; wIdx < words.length; wIdx++) {
-                    pdf.text(words[wIdx], currentX, textY, { baseline: 'top' });
-                    if (wIdx < words.length - 1) {
-                      currentX += pdf.getTextWidth(words[wIdx]) + gapBetween;
-                    }
-                  }
-                }
-              } else {
-                // Single word — just render left-aligned
+              if (isLastLine && !isSingleLine) {
+                // Last line of a multi-line paragraph: left-aligned (correct typography)
                 pdf.text(line, textX, textY, { baseline: 'top' });
+              } else {
+                // Single line OR non-last line: apply justification
+                const words = line.split(' ');
+                if (words.length > 1) {
+                  // Calculate total width of all words without spaces
+                  let wordsWidth = 0;
+                  for (const word of words) {
+                    wordsWidth += pdf.getTextWidth(word);
+                  }
+                  // Calculate the gap to add between each word to fill the full width
+                  const totalGap = maxTextWidth - wordsWidth;
+                  let gapBetween = totalGap / (words.length - 1);
+
+                  // ── Constrain gap to preserve design layout ──
+                  const normalSpace = pdf.getTextWidth(' ');
+                  const MIN_GAP = normalSpace * 0.5;
+                  const MAX_GAP = Math.max(fontSize * 0.6, normalSpace * 2);
+
+                  let useJustify = true;
+
+                  if (gapBetween < MIN_GAP) {
+                    // Gap too small — check if MIN_GAP causes overflow
+                    const forcedWidth = wordsWidth + MIN_GAP * (words.length - 1);
+                    if (forcedWidth > maxTextWidth) {
+                      useJustify = false;
+                    } else {
+                      gapBetween = MIN_GAP;
+                    }
+                  } else if (gapBetween > MAX_GAP) {
+                    // Gap too large — text would look stretched
+                    useJustify = false;
+                  }
+
+                  if (useJustify) {
+                    let currentX = textX;
+                    for (let wIdx = 0; wIdx < words.length; wIdx++) {
+                      pdf.text(words[wIdx], currentX, textY, { baseline: 'top' });
+                      if (wIdx < words.length - 1) {
+                        currentX += pdf.getTextWidth(words[wIdx]) + gapBetween;
+                      }
+                    }
+                  } else {
+                    // Fallback: left-aligned
+                    pdf.text(line, textX, textY, { baseline: 'top' });
+                  }
+                } else {
+                  // Single word — left-aligned
+                  pdf.text(line, textX, textY, { baseline: 'top' });
+                }
               }
-            } else if (align === 'justify' && lineIdx === lines.length - 1) {
-              // Last line of a justified paragraph: left-aligned (no extra spacing)
-              pdf.text(line, textX, textY, { baseline: 'top' });
             } else {
               pdf.text(line, textX, textY, {
                 maxWidth: maxTextWidth,
