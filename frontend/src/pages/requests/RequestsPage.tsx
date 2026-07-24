@@ -174,11 +174,18 @@ export function RequestsPage() {
   const loadBatchSignatures = async () => {
     if (!user?.institution_id) return;
     try {
-      const { data, error } = await supabase
+      let query = supabase
         .from('authorized_signatures')
         .select('id, full_name, title, signature_image_url, is_primary')
         .eq('institution_id', user.institution_id)
-        .eq('is_active', true)
+        .eq('is_active', true);
+
+      // 🔒 Each user can ONLY see their own assigned signatures
+      if (user?.id) {
+        query = query.eq('user_id', user.id);
+      }
+
+      const { data, error } = await query
         .order('is_primary', { ascending: false })
         .order('full_name');
 

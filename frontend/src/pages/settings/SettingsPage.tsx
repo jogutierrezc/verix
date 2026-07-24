@@ -1114,7 +1114,16 @@ export function SettingsPage() {
                         {/* Signature image preview */}
                         <div className="w-full h-20 bg-white/40 rounded-lg border border-dashed border-outline-variant flex items-center justify-center overflow-hidden">
                           {sig.signature_image_url ? (
-                            <img src={sig.signature_image_url} alt="Firma" className="max-h-14 object-contain" />
+                            <div
+                              className="w-full h-full bg-no-repeat bg-contain bg-center max-h-14"
+                              style={{
+                                backgroundImage: `url("${sig.signature_image_url}")`,
+                                pointerEvents: 'none' as React.CSSProperties['pointerEvents'],
+                                userSelect: 'none' as React.CSSProperties['userSelect'],
+                              }}
+                              onContextMenu={e => e.preventDefault()}
+                              draggable={false}
+                            />
                           ) : (
                             <span className="text-[10px] text-on-surface-variant">Sin firma</span>
                           )}

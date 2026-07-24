@@ -836,10 +836,15 @@ export function MinutesPage() {
                           </div>
                         </div>
                         {s.signature_image_url && (
-                          <img
-                            src={s.signature_image_url}
-                            alt={`Firma de ${s.recipient?.full_name}`}
-                            className="max-h-16 object-contain bg-white rounded-lg p-2 border border-outline-variant/20"
+                          <div
+                            className="max-h-16 min-h-[3rem] bg-white bg-no-repeat bg-contain bg-center rounded-lg p-2 border border-outline-variant/20"
+                            style={{
+                              backgroundImage: `url("${s.signature_image_url}")`,
+                              pointerEvents: 'none' as React.CSSProperties['pointerEvents'],
+                              userSelect: 'none' as React.CSSProperties['userSelect'],
+                            }}
+                            onContextMenu={e => e.preventDefault()}
+                            draggable={false}
                           />
                         )}
                       </div>

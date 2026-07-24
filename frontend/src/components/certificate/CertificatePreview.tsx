@@ -18,39 +18,96 @@ interface CertificatePreviewProps {
   onApproved: () => void;
 }
 
-// ── Date conversion: "20/06/2026" → "20 de junio de 2026" ──
+// ── Date conversion: "02/06/2026" → "Dos (02) de Junio de Dos Mil Veintiseis" ──
 const MONTHS = [
   'enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio',
   'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre',
 ];
 
+const MONTHS_CAPITALIZED = MONTHS.map(m => m.charAt(0).toUpperCase() + m.slice(1));
+
+function titleCase(str: string): string {
+  return str.replace(/\b[a-z]/g, c => c.toUpperCase());
+}
+
+// ── Spanish number to words (no accents, matching user's style) ──
+const UNITS = ['cero', 'uno', 'dos', 'tres', 'cuatro', 'cinco', 'seis', 'siete', 'ocho', 'nueve'];
+const TEENS = ['diez', 'once', 'doce', 'trece', 'catorce', 'quince', 'dieciseis', 'diecisiete', 'dieciocho', 'diecinueve'];
+const TENS = ['veinte', 'treinta', 'cuarenta', 'cincuenta', 'sesenta', 'setenta', 'ochenta', 'noventa'];
+
+function numberToSpanishWords(n: number): string {
+  if (n < 10) return UNITS[n];
+  if (n < 20) return TEENS[n - 10];
+  if (n < 30) {
+    if (n === 20) return 'veinte';
+    return 'veinti' + UNITS[n - 20];
+  }
+  if (n < 100) {
+    const ten = Math.floor(n / 10);
+    const unit = n % 10;
+    if (unit === 0) return TENS[ten - 2];
+    return TENS[ten - 2] + ' y ' + UNITS[unit];
+  }
+  if (n < 1000) {
+    const hundred = Math.floor(n / 100);
+    const remainder = n % 100;
+    if (hundred === 1 && remainder === 0) return 'cien';
+    if (hundred === 1) return 'ciento ' + numberToSpanishWords(remainder);
+    const HUNDREDS = ['', 'doscientos', 'trescientos', 'cuatrocientos', 'quinientos', 'seiscientos', 'setecientos', 'ochocientos', 'novecientos'];
+    const result = HUNDREDS[hundred - 1];
+    if (remainder > 0) return result + ' ' + numberToSpanishWords(remainder);
+    return result;
+  }
+  if (n < 2000) {
+    const remainder = n % 1000;
+    if (remainder > 0) return 'mil ' + numberToSpanishWords(remainder);
+    return 'mil';
+  }
+  // 2000+
+  const thousands = Math.floor(n / 1000);
+  const remainder = n % 1000;
+  let result = '';
+  if (thousands === 1) result = 'mil';
+  else result = numberToSpanishWords(thousands) + ' mil';
+  if (remainder > 0) result += ' ' + numberToSpanishWords(remainder);
+  return result;
+}
+
 /**
- * Converts a date string to Spanish text format.
+ * Converts a date string to full Spanish text format with numbers in words.
  * Supports:
- *   - DD/MM/AAAA  → "20 de junio de 2026"
- *   - AAAA-MM-DD  → "20 de junio de 2026"
+ *   - DD/MM/AAAA  → "Dos (02) de Junio de Dos Mil Veintiseis"
+ *   - AAAA-MM-DD  → "Dos (02) de Junio de Dos Mil Veintiseis"
  *   - Any other format → returned as-is
  */
 function formatDateToSpanish(dateStr: string): string {
   // Try DD/MM/AAAA first
   let match = dateStr.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
   if (match) {
-    const day = parseInt(match[1], 10);
+    const dayStr = match[1];
     const month = parseInt(match[2], 10);
-    const year = match[3];
+    const yearStr = match[3];
     if (month >= 1 && month <= 12) {
-      return `${day} de ${MONTHS[month - 1]} de ${year}`;
+      const dayNum = parseInt(dayStr, 10);
+      const yearNum = parseInt(yearStr, 10);
+      const dayWords = titleCase(numberToSpanishWords(dayNum));
+      const yearWords = titleCase(numberToSpanishWords(yearNum));
+      return `${dayWords} (${dayStr}) de ${MONTHS_CAPITALIZED[month - 1]} de ${yearWords}`;
     }
   }
 
   // Try YYYY-MM-DD (from <input type="date">)
   match = dateStr.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
   if (match) {
-    const year = match[1];
+    const yearStr = match[1];
     const month = parseInt(match[2], 10);
-    const day = parseInt(match[3], 10);
+    const dayStr = match[3];
     if (month >= 1 && month <= 12) {
-      return `${day} de ${MONTHS[month - 1]} de ${year}`;
+      const dayNum = parseInt(dayStr, 10);
+      const yearNum = parseInt(yearStr, 10);
+      const dayWords = titleCase(numberToSpanishWords(dayNum));
+      const yearWords = titleCase(numberToSpanishWords(yearNum));
+      return `${dayWords} (${dayStr}) de ${MONTHS_CAPITALIZED[month - 1]} de ${yearWords}`;
     }
   }
 
@@ -355,13 +412,32 @@ export async function renderTemplateToPdf(
                 }
                 // Calculate the gap to add between each word to fill the full width
                 const totalGap = maxTextWidth - wordsWidth;
-                const gapBetween = words.length > 1 ? totalGap / (words.length - 1) : 0;
+                let gapBetween = words.length > 1 ? totalGap / (words.length - 1) : 0;
 
-                let currentX = textX;
-                for (let wIdx = 0; wIdx < words.length; wIdx++) {
-                  pdf.text(words[wIdx], currentX, textY, { baseline: 'top' });
-                  if (wIdx < words.length - 1) {
-                    currentX += pdf.getTextWidth(words[wIdx]) + gapBetween;
+                // ── Constrain gap to preserve design layout ──
+                const normalSpace = pdf.getTextWidth(' ');
+                const MIN_GAP = normalSpace * 0.5;    // At least half a normal space
+                const MAX_GAP = Math.max(fontSize * 0.6, normalSpace * 2);  // At most 60% of font size, but at least 2x normal space
+
+                if (gapBetween < MIN_GAP) {
+                  gapBetween = MIN_GAP;
+                  // Check if forced gap causes overflow → fall back to left-aligned
+                  const newTotalWidth = wordsWidth + gapBetween * (words.length - 1);
+                  if (newTotalWidth > maxTextWidth) {
+                    pdf.text(line, textX, textY, { baseline: 'top' });
+                    gapBetween = -1; // signal to skip rendering below
+                  }
+                }
+                if (gapBetween > MAX_GAP) {
+                  // Gap too large — fall back to left-aligned so text doesn't look stretched
+                  pdf.text(line, textX, textY, { baseline: 'top' });
+                } else {
+                  let currentX = textX;
+                  for (let wIdx = 0; wIdx < words.length; wIdx++) {
+                    pdf.text(words[wIdx], currentX, textY, { baseline: 'top' });
+                    if (wIdx < words.length - 1) {
+                      currentX += pdf.getTextWidth(words[wIdx]) + gapBetween;
+                    }
                   }
                 }
               } else {
@@ -467,10 +543,9 @@ export function CertificatePreview({
           .eq('institution_id', userInstitutionId)
           .eq('is_active', true);
 
-        // 🔒 SIGNER users can ONLY see their own assigned signatures
-        if (userRole === 'SIGNER') {
-          sigQuery = sigQuery.eq('user_id', userId);
-        }
+        // 🔒 Each user can ONLY see their own assigned signatures
+        // SIGNER and ADMIN users both must have their own signature assigned
+        sigQuery = sigQuery.eq('user_id', userId);
 
         const { data: sigs } = await sigQuery
           .order('is_primary', { ascending: false })
