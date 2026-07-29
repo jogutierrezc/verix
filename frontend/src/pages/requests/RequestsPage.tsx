@@ -43,6 +43,9 @@ export function RequestsPage() {
   const [selectedRequestIds, setSelectedRequestIds] = useState<string[]>([]);
   const [batchSelectedSignatureId, setBatchSelectedSignatureId] = useState<string | null>(null);
   const [batchSignatures, setBatchSignatures] = useState<any[]>([]);
+  const [batchRejecting, setBatchRejecting] = useState(false);
+  const [batchRejectionReason, setBatchRejectionReason] = useState('');
+  const [showBatchRejectModal, setShowBatchRejectModal] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const [downloadProgress, setDownloadProgress] = useState({ current: 0, total: 0 });
   const [expandedBatches, setExpandedBatches] = useState<Set<string>>(new Set());
@@ -180,8 +183,9 @@ export function RequestsPage() {
         .eq('institution_id', user.institution_id)
         .eq('is_active', true);
 
-      // 🔒 Each user can ONLY see their own assigned signatures
-      if (user?.id) {
+      // 🔒 SIGNER users only see their own assigned signatures.
+      // ADMIN users can sign on behalf of any authorized signer in the same institution.
+      if (user?.role === 'SIGNER' && user?.id) {
         query = query.eq('user_id', user.id);
       }
 
@@ -220,6 +224,25 @@ export function RequestsPage() {
     setSigningRequestIds(requestIds);
     setShowBatchModal(true);
     setBatchSelectedSignatureId(batchSignatures.find((sig: any) => sig.is_primary)?.id || batchSignatures[0]?.id || null);
+  };
+
+  const openSelectedRequestsRejectModal = (requestIds: string[]) => {
+    const requestsInBatch = requests.filter(req => requestIds.includes(req.id));
+    setBatchRequests(requestsInBatch);
+    setSigningBatchId(null);
+    setSigningRequestIds(requestIds);
+    setBatchRejectionReason('');
+    setShowBatchRejectModal(true);
+  };
+
+  const openBatchRejectModal = async (batchId: string) => {
+    const allItems = await fetchBatchItems(batchId);
+    const pendingItems = allItems.filter(item => ['PENDING', 'IN_REVIEW'].includes(item.status));
+    setBatchRequests(pendingItems);
+    setSigningBatchId(batchId);
+    setSigningRequestIds(pendingItems.map(item => item.id));
+    setBatchRejectionReason('');
+    setShowBatchRejectModal(true);
   };
 
   const toggleRequestSelection = (id: string) => {
@@ -264,7 +287,6 @@ export function RequestsPage() {
       }
 
       const { error } = await query.in('status', ['PENDING', 'IN_REVIEW']);
-
       if (error) throw error;
 
       // ── Audit log: firma de lote ──
@@ -296,6 +318,64 @@ export function RequestsPage() {
       console.error('❌ Batch sign error:', err);
     } finally {
       setBatchSigning(false);
+    }
+  };
+
+  const handleRejectBatch = async () => {
+    const idsToReject = signingRequestIds;
+    if (idsToReject.length === 0) {
+      toast.error('No hay solicitudes seleccionadas para rechazar');
+      return;
+    }
+    if (!batchRejectionReason.trim()) {
+      toast.error('Debes indicar un motivo de rechazo');
+      return;
+    }
+
+    setBatchRejecting(true);
+    try {
+      const query = supabase.from('certificate_requests').update({
+        status: 'REJECTED',
+        reviewed_by: user?.id,
+        reviewed_at: new Date().toISOString(),
+        rejection_reason: batchRejectionReason,
+      });
+
+      if (signingRequestIds.length > 0) {
+        query.in('id', signingRequestIds);
+      } else if (signingBatchId) {
+        query.eq('batch_id', signingBatchId);
+      }
+
+      const { error } = await query.in('status', ['PENDING', 'IN_REVIEW']);
+      if (error) throw error;
+
+      try {
+        const ip = await getClientIP();
+        await auditApi.log({
+          user_id: user?.id,
+          user_email: user?.email,
+          module: 'signatures',
+          action: 'batch_reject',
+          entity_id: signingBatchId || signingRequestIds.join(','),
+          entity_type: 'certificate_request_batch',
+          ip_address: ip,
+          description: `Rechazo masivo de ${idsToReject.length} solicitudes - Motivo: ${batchRejectionReason}`,
+        });
+      } catch { /* silent */ }
+
+      toast.success('Lote rechazado exitosamente');
+      setShowBatchRejectModal(false);
+      setBatchRejectionReason('');
+      setSigningBatchId(null);
+      setSigningRequestIds([]);
+      setBatchRequests([]);
+      loadRequests();
+    } catch (err: any) {
+      toast.error(err.message || 'Error al rechazar el lote');
+      console.error('❌ Batch reject error:', err);
+    } finally {
+      setBatchRejecting(false);
     }
   };
 
@@ -966,12 +1046,20 @@ export function RequestsPage() {
             <option value={100}>100</option>
           </select>
           {(user?.role === 'SIGNER' || user?.role === 'ADMIN') && selectedRequestIds.length > 0 && (
-            <button
-              onClick={() => openSelectedRequestsModal(selectedRequestIds)}
-              className="btn-secondary btn-sm text-xs h-10"
-            >
-              Firmar ({selectedRequestIds.length})
-            </button>
+            <>
+              <button
+                onClick={() => openSelectedRequestsModal(selectedRequestIds)}
+                className="btn-secondary btn-sm text-xs h-10"
+              >
+                Firmar ({selectedRequestIds.length})
+              </button>
+              <button
+                onClick={() => openSelectedRequestsRejectModal(selectedRequestIds)}
+                className="btn-danger btn-sm text-xs h-10"
+              >
+                Rechazar ({selectedRequestIds.length})
+              </button>
+            </>
           )}
           {user?.role === 'APPLICANT' && (
             <>
@@ -1236,6 +1324,12 @@ export function RequestsPage() {
                         className="btn-secondary btn-xs px-3 py-1.5 text-xs"
                       >
                         <CheckCircle size={14} /> Firmar lote
+                      </button>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); openBatchRejectModal(batchId); }}
+                        className="btn-danger btn-xs px-3 py-1.5 text-xs"
+                      >
+                        <XCircle size={14} /> Rechazar lote
                       </button>
                       {displayItems.filter((r: any) => r.status === 'PENDING').slice(0, 3).map((r: any) => (
                         <button
@@ -1576,6 +1670,45 @@ export function RequestsPage() {
               <button onClick={() => setShowBatchModal(false)} className="btn-secondary px-6 py-3">Cancelar</button>
               <button onClick={handleApproveBatch} disabled={batchSigning || batchSignatures.length > 0 && !batchSelectedSignatureId} className="btn-primary px-6 py-3">
                 {batchSigning ? 'Firmando lote...' : 'Firmar lote'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showBatchRejectModal && (
+        <div className="fixed inset-0 z-50 flex items-end md:items-center justify-center bg-black/50 backdrop-blur-sm p-0 md:p-4 animate-fade-in">
+          <div className="bg-white rounded-t-3xl md:rounded-3xl shadow-2xl w-full md:max-w-xl max-h-[90vh] overflow-hidden animate-slide-up md:animate-scale-in">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-outline-variant/20">
+              <div>
+                <h2 className="text-lg font-bold text-on-surface">Rechazar lote</h2>
+                <p className="text-sm text-on-surface-variant">Indica el motivo de rechazo para este conjunto de solicitudes.</p>
+              </div>
+              <button onClick={() => setShowBatchRejectModal(false)} className="p-2 rounded-xl text-on-surface-variant hover:bg-surface-container-high">
+                <X size={20} />
+              </button>
+            </div>
+            <div className="p-6 space-y-4">
+              <div className="glass-card p-4 rounded-2xl border border-outline-variant/50">
+                <p className="text-sm text-on-surface-variant">Cantidad de solicitudes seleccionadas: <strong>{batchRequests.length}</strong></p>
+                {signingBatchId && (
+                  <p className="text-sm text-on-surface-variant">Lote: <strong>{signingBatchId}</strong></p>
+                )}
+              </div>
+              <div>
+                <label className="text-sm font-semibold text-on-surface">Motivo de rechazo</label>
+                <textarea
+                  className="input mt-2 w-full min-h-[120px]"
+                  value={batchRejectionReason}
+                  onChange={(e) => setBatchRejectionReason(e.target.value)}
+                  placeholder="Describe el motivo por el que se rechaza este lote"
+                />
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-3 px-6 py-4 border-t border-outline-variant/20">
+              <button onClick={() => setShowBatchRejectModal(false)} className="btn-secondary px-6 py-3">Cancelar</button>
+              <button onClick={handleRejectBatch} disabled={batchRejecting || !batchRejectionReason.trim()} className="btn-danger px-6 py-3">
+                {batchRejecting ? 'Rechazando...' : 'Rechazar lote'}
               </button>
             </div>
           </div>

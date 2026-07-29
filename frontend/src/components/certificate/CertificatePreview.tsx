@@ -585,9 +585,11 @@ export function CertificatePreview({
           .eq('institution_id', userInstitutionId)
           .eq('is_active', true);
 
-        // 🔒 Each user can ONLY see their own assigned signatures
-        // SIGNER and ADMIN users both must have their own signature assigned
-        sigQuery = sigQuery.eq('user_id', userId);
+        // 🔒 SIGNER users only see their own assigned signatures.
+        // ADMIN users can choose any authorized signature from the institution.
+        if (userRole === 'SIGNER') {
+          sigQuery = sigQuery.eq('user_id', userId);
+        }
 
         const { data: sigs } = await sigQuery
           .order('is_primary', { ascending: false })
