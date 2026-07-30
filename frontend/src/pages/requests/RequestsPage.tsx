@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, Fragment } from 'react';
 import { useAuth } from '../../hooks/useAuth';
 import { Link, useNavigate } from 'react-router-dom';
 import { supabase } from '../../lib/supabase';
@@ -47,6 +47,7 @@ export function RequestsPage() {
   const [selectedRequestIds, setSelectedRequestIds] = useState<string[]>([]);
   const [batchSelectedSignatureId, setBatchSelectedSignatureId] = useState<string | null>(null);
   const [batchSignatures, setBatchSignatures] = useState<any[]>([]);
+  const [loadingItemId, setLoadingItemId] = useState<string | null>(null);
   const [batchRejecting, setBatchRejecting] = useState(false);
   const [batchRejectionReason, setBatchRejectionReason] = useState('');
   const [showBatchRejectModal, setShowBatchRejectModal] = useState(false);
@@ -499,8 +500,6 @@ export function RequestsPage() {
                 ? { ...item, status: 'REJECTED', reviewed_by: user?.id, reviewed_at: new Date().toISOString(), rejection_reason: rejectReason }
                 : item
             ));
-          } else {
-            next.delete(targetReq.batch_id);
           }
           return next;
         });
@@ -566,7 +565,7 @@ export function RequestsPage() {
   };
 
   const handleApproveSingle = async (id: string) => {
-    setBatchSigning(true);
+    setLoadingItemId(id);
     try {
       const selectedSig = batchSignatures.find((sig: any) => sig.id === batchSelectedSignatureId)
         || batchSignatures.find((sig: any) => sig.is_primary)
@@ -614,8 +613,6 @@ export function RequestsPage() {
             next.set(affectedBatchId, cached.map(item =>
               item.id === id ? { ...item, ...updateData } : item
             ));
-          } else {
-            next.delete(affectedBatchId);
           }
           return next;
         });
@@ -627,7 +624,7 @@ export function RequestsPage() {
       toast.error(err.message || 'Error al aprobar la solicitud');
       console.error('❌ Approve single request error:', err);
     } finally {
-      setBatchSigning(false);
+      setLoadingItemId(null);
     }
   };
 
@@ -1397,8 +1394,9 @@ export function RequestsPage() {
                             <Eye size={18} />
                           </button>
                           <button onClick={() => handleApproveSingle(req.id)}
-                            className="p-2 hover:bg-primary/10 rounded-full text-primary transition-colors" title="Aprobar solicitud">
-                            <CheckCircle size={18} />
+                            disabled={loadingItemId === req.id}
+                            className="p-2 hover:bg-primary/10 rounded-full text-primary transition-colors disabled:opacity-40 disabled:cursor-not-allowed" title="Aprobar solicitud">
+                            {loadingItemId === req.id ? <Loader2 size={18} className="animate-spin" /> : <CheckCircle size={18} />}
                           </button>
                           <button onClick={() => setSelected(selected === req.id ? null : req.id)}
                             className="p-2 hover:bg-error/10 rounded-full text-error transition-colors" title="Rechazar">
@@ -1555,6 +1553,40 @@ export function RequestsPage() {
                       Creado {format(new Date(firstReq.created_at), 'dd/MM/yyyy')}
                       {firstReq.template?.name && ` · ${firstReq.template.name}`}
                     </p>
+                    {/* Barra de progreso */}
+                    {realTotal > 0 && (
+                      <div className="mt-2 w-full max-w-[280px]">
+                        <div className="w-full h-1.5 bg-outline-variant/20 rounded-full overflow-hidden flex">
+                          {approvedCount > 0 && (
+                            <div
+                              className="h-full bg-primary rounded-l-full transition-all duration-500"
+                              style={{ width: `${(approvedCount / realTotal) * 100}%` }}
+                            />
+                          )}
+                          {pendingCount > 0 && (
+                            <div
+                              className="h-full bg-secondary transition-all duration-500"
+                              style={{ width: `${(pendingCount / realTotal) * 100}%` }}
+                            />
+                          )}
+                          {(realTotal - approvedCount - pendingCount) > 0 && (
+                            <div
+                              className={`h-full ${approvedCount === 0 ? 'rounded-l-full' : ''} bg-surface-variant rounded-r-full transition-all duration-500`}
+                              style={{ width: `${((realTotal - approvedCount - pendingCount) / realTotal) * 100}%` }}
+                            />
+                          )}
+                        </div>
+                        <div className="flex items-center gap-2 mt-1 flex-wrap">
+                          <span className="text-[10px] text-primary font-semibold">{Math.round((approvedCount / realTotal) * 100)}% aprobados</span>
+                          <span className="text-[10px] text-secondary font-semibold">{Math.round((pendingCount / realTotal) * 100)}% pendientes</span>
+                          {(realTotal - approvedCount - pendingCount) > 0 && (
+                            <span className="text-[10px] text-on-surface-variant/60">
+                              {Math.round(((realTotal - approvedCount - pendingCount) / realTotal) * 100)}% otras
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    )}
                   </div>
                   <div className="flex items-center gap-3">
                     {loadingBatch === batchId && (
@@ -1684,116 +1716,139 @@ export function RequestsPage() {
                         </p>
                       </div>
                     ) : (
-                      displayItems.map((req: any) => {
-                        const status = statusConfig[req.status] || { label: req.status, color: '', bg: '', borderColor: '' };
-                        return (
-                          <div key={req.id} className="relative">
-                            <div
-                              className={`flex items-center gap-3 px-5 py-3 hover:bg-surface-container-low/50 transition-colors border-l-4 ${status.borderColor} ${
-                                deleteConfirmId === req.id ? 'opacity-20 pointer-events-none' : ''
-                              }`}
-                            >
-                              <div className="flex-1 grid grid-cols-1 md:grid-cols-4 gap-2 text-sm">
-                                <div>
-                                  <span className="text-[10px] uppercase tracking-wider text-on-surface-variant/50 font-bold block">Código</span>
-                                  <span className="font-mono text-xs font-semibold text-primary">{req.code}</span>
-                                </div>
-                                <div>
-                                  <span className="text-[10px] uppercase tracking-wider text-on-surface-variant/50 font-bold block">Estudiante</span>
-                                  <span className="text-xs text-on-surface">{getStudentName(req)}</span>
-                                </div>
-                                <div>
-                                  <span className="text-[10px] uppercase tracking-wider text-on-surface-variant/50 font-bold block">Documento</span>
-                                  <span className="text-xs text-on-surface-variant">{getStudentDocument(req)}</span>
-                                </div>
-                                <div className="flex items-center justify-between gap-2">
-                                  <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${status.color} ${status.bg}`}>
-                                    {status.label}
-                                  </span>
-                                  <div className="flex items-center gap-1">
-                                    {['PENDING', 'IN_REVIEW'].includes(req.status) && (user?.role === 'SIGNER' || user?.role === 'ADMIN') && (
-                                      <>
-                                        <button
-                                          onClick={(e) => { e.stopPropagation(); setPreviewRequestId(req.id); }}
-                                          className="p-1.5 hover:bg-primary/10 rounded-full text-primary transition-colors"
-                                          title="Vista previa"
-                                        >
-                                          <Eye size={15} />
-                                        </button>
-                                        <button
-                                          onClick={(e) => { e.stopPropagation(); handleApproveSingle(req.id); }}
-                                          className="p-1.5 hover:bg-primary/10 rounded-full text-primary transition-colors"
-                                          title="Aprobar solicitud"
-                                        >
-                                          <CheckCircle size={15} />
-                                        </button>
-                                        <button
-                                          onClick={(e) => { e.stopPropagation(); setSelected(selected === req.id ? null : req.id); }}
-                                          className="p-1.5 hover:bg-error/10 rounded-full text-error transition-colors"
-                                          title="Rechazar solicitud"
-                                        >
-                                          <XCircle size={15} />
-                                        </button>
-                                      </>
-                                    )}
-                                    {(req.status === 'APPROVED' || req.status === 'SIGNED') && (
-                                      <>
-                                        <button
-                                          onClick={(e) => { e.stopPropagation(); setPreviewRequestId(req.id); }}
-                                          className="p-1.5 hover:bg-primary/10 rounded-full text-primary transition-colors"
-                                          title="Ver certificado"
-                                        >
-                                          <Eye size={15} />
-                                        </button>
-                                        <button
-                                          onClick={(e) => { e.stopPropagation(); downloadSignedPdf(req); }}
-                                          disabled={downloading}
-                                          className="p-1.5 hover:bg-primary/10 rounded-full text-primary transition-colors"
-                                          title="Descargar PDF con Firma Electrónica"
-                                        >
-                                          <Download size={15} />
-                                        </button>
-                                        {(user?.role === 'SIGNER' || user?.role === 'ADMIN') && (
-                                          <button
-                                            onClick={(e) => { e.stopPropagation(); setSelected(null); setRevokeReason(''); setRevokeSelectedId(req.id); }}
-                                            className="p-1.5 hover:bg-amber-100 rounded-full text-amber-700 transition-colors"
-                                            title="Revocar firma"
-                                          >
-                                            <AlertTriangle size={15} />
-                                          </button>
-                                        )}
-                                      </>
-                                    )}
-                                    {/* Applicant: edit individual batch item */}
-                                    {user?.role === 'APPLICANT' && EDITABLE_STATUSES.includes(req.status) && (
-                                      <>
-                                        <Link
-                                          to={`/requests/edit/${req.id}`}
-                                          onClick={(e) => e.stopPropagation()}
-                                          className="p-1.5 hover:bg-primary/10 rounded-full text-primary transition-colors"
-                                          title={`Editar ${req.code}`}
-                                        >
-                                          <Edit size={15} />
-                                        </Link>
-                                        <button
-                                          onClick={(e) => { e.stopPropagation(); setDeleteConfirmId(deleteConfirmId === req.id ? null : req.id); }}
-                                          className="p-1.5 hover:bg-error/10 rounded-full text-error transition-colors"
-                                          title={`Eliminar ${req.code}`}
-                                        >
-                                          <Trash2 size={15} />
-                                        </button>
-                                      </>
-                                    )}
-                                  </div>
-                                </div>
-                              </div>
-                            </div>
+                      (() => {
+  const approvedItems = displayItems.filter((r: any) => ['APPROVED', 'SIGNED'].includes(r.status));
+  const pendingItems = displayItems.filter((r: any) => ['PENDING', 'IN_REVIEW'].includes(r.status));
+  const otherItems = displayItems.filter((r: any) => !['APPROVED', 'SIGNED', 'PENDING', 'IN_REVIEW'].includes(r.status));
+  const sections = [];
+  if (approvedItems.length > 0) sections.push({ type: 'approved', items: approvedItems, label: '\u2705 Aprobados', color: 'text-primary', bg: 'bg-primary/5', border: 'border-primary/10' });
+  if (pendingItems.length > 0) sections.push({ type: 'pending', items: pendingItems, label: '\u23F3 Pendientes', color: 'text-secondary', bg: 'bg-secondary-fixed/30', border: 'border-secondary/10' });
+  if (otherItems.length > 0) sections.push({ type: 'other', items: otherItems, label: 'Otras', color: 'text-on-surface-variant', bg: 'bg-surface-variant/30', border: 'border-outline-variant/10' });
 
-                            {/* (Reject modal moved to centralized popup below) */}
-                            {/* (Delete confirmation moved to centralized popup below) */}
-                          </div>
-                        );
-                      })
+  return sections.map((section) => {
+    return (
+      <Fragment key={section.type}>
+        <div className={`px-5 py-2 ${section.bg} border-b ${section.border}`}>
+          <span className={`text-[11px] uppercase tracking-wider font-bold ${section.color}`}>
+            <span>{section.label}</span>
+            <span className="ml-1.5 text-[10px] opacity-70">({section.items.length})</span>
+          </span>
+        </div>
+        {section.items.map((req: any) => {
+          const status = statusConfig[req.status] || { label: req.status, color: '', bg: '', borderColor: '' };
+          return (
+            <div key={req.id} className="relative">
+              <div
+                className={`flex items-center gap-3 px-5 py-3 hover:bg-surface-container-low/50 transition-colors border-l-4 ${status.borderColor} ${
+                  deleteConfirmId === req.id ? 'opacity-20 pointer-events-none' : ''
+                }`}
+              >
+                <div className="flex-1 grid grid-cols-1 md:grid-cols-4 gap-2 text-sm">
+                  <div>
+                    <span className="text-[10px] uppercase tracking-wider text-on-surface-variant/50 font-bold block">Código</span>
+                    <span className="font-mono text-xs font-semibold text-primary">{req.code}</span>
+                  </div>
+                  <div>
+                    <span className="text-[10px] uppercase tracking-wider text-on-surface-variant/50 font-bold block">Estudiante</span>
+                    <span className="text-xs text-on-surface">{getStudentName(req)}</span>
+                  </div>
+                  <div>
+                    <span className="text-[10px] uppercase tracking-wider text-on-surface-variant/50 font-bold block">Documento</span>
+                    <span className="text-xs text-on-surface-variant">{getStudentDocument(req)}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${status.color} ${status.bg}`}>
+                      {status.label}
+                    </span>
+                    <div className="flex items-center gap-1">
+                      {['PENDING', 'IN_REVIEW'].includes(req.status) && (user?.role === 'SIGNER' || user?.role === 'ADMIN') && (
+                        <>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); setPreviewRequestId(req.id); }}
+                            className="p-1.5 hover:bg-primary/10 rounded-full text-primary transition-colors"
+                            title="Vista previa"
+                          >
+                            <Eye size={15} />
+                          </button>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); handleApproveSingle(req.id); }}
+                            disabled={loadingItemId === req.id}
+                            className="p-1.5 hover:bg-primary/10 rounded-full text-primary transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                            title="Aprobar solicitud"
+                          >
+                            {loadingItemId === req.id ? <Loader2 size={15} className="animate-spin" /> : <CheckCircle size={15} />}
+                          </button>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); setSelected(selected === req.id ? null : req.id); }}
+                            className="p-1.5 hover:bg-error/10 rounded-full text-error transition-colors"
+                            title="Rechazar solicitud"
+                          >
+                            <XCircle size={15} />
+                          </button>
+                        </>
+                      )}
+                      {(req.status === 'APPROVED' || req.status === 'SIGNED') && (
+                        <>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); setPreviewRequestId(req.id); }}
+                            className="p-1.5 hover:bg-primary/10 rounded-full text-primary transition-colors"
+                            title="Ver certificado"
+                          >
+                            <Eye size={15} />
+                          </button>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); downloadSignedPdf(req); }}
+                            disabled={downloading}
+                            className="p-1.5 hover:bg-primary/10 rounded-full text-primary transition-colors"
+                            title="Descargar PDF con Firma Electrónica"
+                          >
+                            <Download size={15} />
+                          </button>
+                          {(user?.role === 'SIGNER' || user?.role === 'ADMIN') && (
+                            <button
+                              onClick={(e) => { e.stopPropagation(); setSelected(null); setRevokeReason(''); setRevokeSelectedId(req.id); }}
+                              className="p-1.5 hover:bg-amber-100 rounded-full text-amber-700 transition-colors"
+                              title="Revocar firma"
+                            >
+                              <AlertTriangle size={15} />
+                            </button>
+                          )}
+                        </>
+                      )}
+                      {/* Applicant: edit individual batch item */}
+                      {user?.role === 'APPLICANT' && EDITABLE_STATUSES.includes(req.status) && (
+                        <>
+                          <Link
+                            to={`/requests/edit/${req.id}`}
+                            onClick={(e) => e.stopPropagation()}
+                            className="p-1.5 hover:bg-primary/10 rounded-full text-primary transition-colors"
+                            title={`Editar ${req.code}`}
+                          >
+                            <Edit size={15} />
+                          </Link>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); setDeleteConfirmId(deleteConfirmId === req.id ? null : req.id); }}
+                            className="p-1.5 hover:bg-error/10 rounded-full text-error transition-colors"
+                            title={`Eliminar ${req.code}`}
+                          >
+                            <Trash2 size={15} />
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* (Reject modal moved to centralized popup below) */}
+              {/* (Delete confirmation moved to centralized popup below) */}
+            </div>
+          );
+        })}
+      </Fragment>
+    );
+  });
+})()
                     )}
                   </div>
                 )}
