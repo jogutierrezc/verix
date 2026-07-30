@@ -46,6 +46,7 @@ BEGIN
   WHERE cr.verification_code = p_code
      OR cr.code = p_code
      OR cr.consecutive_number = p_code
+     OR u.document_id = p_code
   LIMIT 1;
 
   RETURN v_result;

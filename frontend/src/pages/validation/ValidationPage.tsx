@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { useParams } from 'react-router-dom';
+import { useParams, useLocation } from 'react-router-dom';
 import { supabase } from '../../lib/supabase';
 import { QRCodeCanvas } from 'qrcode.react';
 import jsPDF from 'jspdf';
@@ -187,7 +187,8 @@ const MOCK_INSTITUTION = {
 };
 
 export function ValidationPage() {
-  const { code } = useParams<{ code: string }>();
+  const { code: codeParam } = useParams<{ code: string }>();
+  const location = useLocation();
 
   const [request, setRequest] = useState<any>(null);
   const [template, setTemplate] = useState<any>(null);
@@ -202,15 +203,24 @@ export function ValidationPage() {
   const certificateRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    if (code) loadCertificate();
-  }, [code]);
+    const urlParams = new URLSearchParams(location.search);
+    const codeQuery = urlParams.get('code');
+    const currentCode = codeQuery || codeParam;
 
-  const loadCertificate = async () => {
+    if (currentCode) {
+      loadCertificate(currentCode);
+    } else {
+      setError('No se proporcionó ningún código para validar.');
+      setLoading(false);
+    }
+  }, [codeParam, location.search]);
+
+  const loadCertificate = async (effectiveCode: string) => {
     setLoading(true);
     setError(null);
 
     // Fallback to mock data if no code provided or Supabase unavailable
-    if (!code) {
+    if (!effectiveCode) {
       setTimeout(() => {
         setRequest(MOCK_CERTIFICATE);
         setTemplate(MOCK_TEMPLATE);
@@ -226,7 +236,7 @@ export function ValidationPage() {
 
       // Llamar a la RPC function pública (SECURITY DEFINER, bypasses RLS)
       const { data: rpcData, error: rpcError } = await supabase
-        .rpc('get_certificate_for_validation', { p_code: code });
+        .rpc('get_certificate_for_validation', { p_code: effectiveCode });
 
       if (rpcError) {
         console.warn('RPC falló, intentando consulta directa:', rpcError);
@@ -239,7 +249,7 @@ export function ValidationPage() {
         const { data: directData } = await supabase
           .from('certificate_requests')
           .select('*, user:users!certificate_requests_user_id_fkey(first_name, last_name, document_id)')
-          .or(`code.eq.${code},consecutive_number.eq.${code},verification_code.eq.${code}`)
+          .or(`code.eq.${effectiveCode},consecutive_number.eq.${effectiveCode},verification_code.eq.${effectiveCode},user.document_id.eq.${effectiveCode}`)
           .maybeSingle();
 
         if (directData) {
@@ -292,7 +302,10 @@ export function ValidationPage() {
     }
   };
 
-  const validationUrl = typeof window !== 'undefined' ? window.location.href : `https://verix.com/validate/${code || 'demo'}`;
+  const currentCode = new URLSearchParams(location.search).get('code') || codeParam;
+  const validationUrl = typeof window !== 'undefined'
+    ? window.location.href
+    : `https://verix.com/validate/${currentCode || 'demo'}`;
   const status = statusConfig[request?.status] || {
     label: 'Estado Desconocido',
     color: 'text-slate-500 bg-slate-50',
@@ -559,7 +572,10 @@ export function ValidationPage() {
                 </ul>
               </div>
               <button
-                onClick={loadCertificate}
+                onClick={() => {
+                  const currentCode = new URLSearchParams(location.search).get('code') || codeParam;
+                  if (currentCode) loadCertificate(currentCode);
+                }}
                 className="mt-4 flex items-center justify-center gap-2 px-5 py-2.5 bg-slate-900 text-white rounded-xl text-sm font-bold hover:bg-slate-800 transition"
               >
                 <RefreshCw size={16} /> Reintentar Verificación

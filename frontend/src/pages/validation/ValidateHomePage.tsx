@@ -27,7 +27,7 @@ export function ValidateHomePage() {
           </div>
           <h1 className="text-2xl font-bold text-gray-800">Verificar Certificado</h1>
           <p className="text-sm text-gray-500 mt-1">
-            Ingresa el código de solicitud o el número de radicado del certificado
+            Ingresa el código de solicitud, número de radicado o número de documento para validar tu certificado
           </p>
         </div>
 
@@ -39,7 +39,7 @@ export function ValidateHomePage() {
               <input
                 type="text"
                 className="input w-full pl-11 pr-4 py-3 text-base"
-                placeholder="Código de solicitud o radicado..."
+                placeholder="Código de solicitud, radicado o documento..."
                 value={searchCode}
                 onChange={e => setSearchCode(e.target.value)}
                 autoFocus
