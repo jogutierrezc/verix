@@ -13,6 +13,7 @@ import { CertificatePreview, renderTemplateToPdf, fillTemplate, convertDatesInDa
 import type { TemplateElement } from '../../components/editor/TemplateCanvas';
 import { getPageDimensions, type PageSizeName } from '../../lib/pageSizes';
 import { SkeletonCard } from '../../components/ui/SkeletonCard';
+import { Modal } from '../../components/ui/Modal';
 
 const EDITABLE_STATUSES = ['DRAFT', 'PENDING', 'IN_REVIEW', 'REJECTED'];
 
@@ -51,6 +52,7 @@ export function RequestsPage() {
   const [showBatchRejectModal, setShowBatchRejectModal] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const [downloadProgress, setDownloadProgress] = useState({ current: 0, total: 0 });
+  const [batchRadicadoCount, setBatchRadicadoCount] = useState<number | null>(null);
   const [expandedBatches, setExpandedBatches] = useState<Set<string>>(new Set());
 
   // ── Full batch data cache (loaded on-demand, bypasses pagination) ──
@@ -217,6 +219,7 @@ export function RequestsPage() {
     setSigningBatchId(batchId);
     setSigningRequestIds(allItems.map(req => req.id));
     setShowBatchModal(true);
+    setBatchRadicadoCount(null);
     setBatchSelectedSignatureId(batchSignatures.find((sig: any) => sig.is_primary)?.id || batchSignatures[0]?.id || null);
   };
 
@@ -226,6 +229,7 @@ export function RequestsPage() {
     setSigningBatchId(null);
     setSigningRequestIds(requestIds);
     setShowBatchModal(true);
+    setBatchRadicadoCount(null);
     setBatchSelectedSignatureId(batchSignatures.find((sig: any) => sig.is_primary)?.id || batchSignatures[0]?.id || null);
   };
 
@@ -252,6 +256,34 @@ export function RequestsPage() {
     setSelectedRequestIds((prev) =>
       prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id],
     );
+  };
+
+  /** Genera un radicado (consecutive_number) para una solicitud usando el RPC */
+  const generateRadicadoForRequest = async (reqId: string, templateId: string): Promise<string | null> => {
+    if (!user?.institution_id) return null;
+    try {
+      const { data, error } = await supabase.rpc('get_next_radicado_for_template', {
+        p_template_id: templateId,
+        p_institution_id: user.institution_id,
+        p_dependency_id: null,
+      });
+      if (error) {
+        console.warn('⚠️ No se pudo generar radicado:', error.message);
+        return null;
+      }
+      if (data && data.length > 0 && data[0].radicado_code) {
+        // Save consecutive_number on the request
+        await supabase
+          .from('certificate_requests')
+          .update({ consecutive_number: data[0].radicado_code })
+          .eq('id', reqId);
+        return data[0].radicado_code;
+      }
+      return null;
+    } catch (err) {
+      console.warn('⚠️ Error generando radicado:', err);
+      return null;
+    }
   };
 
   const handleApproveBatch = async () => {
@@ -282,6 +314,7 @@ export function RequestsPage() {
         }
       }
 
+      // Bulk update: approve all selected requests
       const query = supabase.from('certificate_requests').update(updateData);
       if (signingRequestIds.length > 0) {
         query.in('id', signingRequestIds);
@@ -291,6 +324,20 @@ export function RequestsPage() {
 
       const { error } = await query.in('status', ['PENDING', 'IN_REVIEW']);
       if (error) throw error;
+
+      // ── Generate radicado (consecutive_number) for each approved item ──
+      // Sequential generation to avoid race conditions with the RPC counter
+      let radicadoCount = 0;
+      for (const req of batchRequests) {
+        if (signingRequestIds.includes(req.id) && req.template_id) {
+          const result = await generateRadicadoForRequest(req.id, req.template_id);
+          if (result) radicadoCount++;
+        }
+      }
+      setBatchRadicadoCount(radicadoCount);
+      if (radicadoCount > 0) {
+        console.log(`📋 Radicados generados para ${radicadoCount} solicitudes del lote`);
+      }
 
       // ── Audit log: firma de lote ──
       try {
@@ -521,12 +568,20 @@ export function RequestsPage() {
         });
       }
 
+      // Get the request to find its template_id for radicado generation
+      const targetReq = requests.find(r => r.id === id) || batchRequests.find(r => r.id === id);
+
       const { error } = await supabase
         .from('certificate_requests')
         .update(updateData)
         .eq('id', id)
         .in('status', ['PENDING', 'IN_REVIEW']);
       if (error) throw error;
+
+      // ── Generate radicado (consecutive_number) for this request ──
+      if (targetReq?.template_id) {
+        await generateRadicadoForRequest(id, targetReq.template_id);
+      }
 
       toast.success('Solicitud aprobada');
       loadRequests();
@@ -871,6 +926,33 @@ export function RequestsPage() {
   const downloadSignedPdf = async (req: any) => {
     setDownloading(true);
     try {
+      const reqCode = req.code || '';
+
+      // ── Priority 1: Download from stored certificate_url (more reliable) ──
+      if (req.certificate_url && ['APPROVED', 'SIGNED'].includes(req.status)) {
+        toast.loading('Descargando PDF firmado...', { id: `signed-pdf-${req.id}` });
+        try {
+          const response = await fetch(req.certificate_url);
+          if (response.ok) {
+            const blob = await response.blob();
+            const link = document.createElement('a');
+            const objectUrl = URL.createObjectURL(blob);
+            link.href = objectUrl;
+            link.download = `certificado-${reqCode || req.id.substring(0, 8)}-firmado.pdf`;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            URL.revokeObjectURL(objectUrl);
+            toast.success('✅ PDF con firma electrónica descargado', { id: `signed-pdf-${req.id}` });
+            return;
+          }
+          console.warn(`⚠️ Error descargando PDF desde URL, generando on-the-fly: ${response.status}`);
+        } catch (fetchErr) {
+          console.warn('⚠️ Falló descarga desde URL, generando on-the-fly:', fetchErr);
+        }
+      }
+
+      // ── Priority 2: Generate PDF on-the-fly (fallback) ──
       toast.loading('Generando PDF con firma electrónica...', { id: `signed-pdf-${req.id}` });
 
       // 1. Load template config
@@ -903,7 +985,6 @@ export function RequestsPage() {
 
       // 2. Build request data with validation URL
       const rawData = req.data || {};
-      const reqCode = req.code || '';
       const verificationCode = req.verification_code || reqCode;
       const validationUrl = `${window.location.origin}/validate/${verificationCode}`;
 
@@ -1816,8 +1897,19 @@ export function RequestsPage() {
             </div>
             <div className="flex items-center justify-end gap-3 px-6 py-4 border-t border-outline-variant/20">
               <button onClick={() => setShowBatchModal(false)} className="btn-secondary px-6 py-3">Cancelar</button>
+              {batchRadicadoCount !== null && batchRadicadoCount > 0 && (
+                <div className="flex items-center gap-2 text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-1.5 animate-fade-in">
+                  <CheckCircle size={16} className="text-emerald-600 shrink-0" />
+                  <span>{batchRadicadoCount} radicado{batchRadicadoCount !== 1 ? 's' : ''} generado{batchRadicadoCount !== 1 ? 's' : ''}</span>
+                </div>
+              )}
               <button onClick={handleApproveBatch} disabled={batchSigning || batchSignatures.length > 0 && !batchSelectedSignatureId} className="btn-primary px-6 py-3">
-                {batchSigning ? 'Firmando lote...' : 'Firmar lote'}
+                {batchSigning ? (
+                  <span className="flex items-center gap-2">
+                    <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                    Firmando lote...
+                  </span>
+                ) : 'Firmar lote'}
               </button>
             </div>
           </div>
@@ -2039,200 +2131,137 @@ export function RequestsPage() {
         </div>
       )}
 
-      {/* ── Centralized Reject Modal (popup emergente) ── */}
-      {selected && (() => {
-        const rejectReq = filtered.find(r => r.id === selected);
-        if (!rejectReq) return null;
-        return (
-          <div
-            className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4 animate-fade-in"
-            onClick={() => { setSelected(null); setRejectReason(''); }}
-          >
-            <div
-              className="bg-white rounded-3xl shadow-2xl w-full max-w-md overflow-hidden animate-scale-in"
-              onClick={e => e.stopPropagation()}
+      {/* ── Centralized Reject Modal ── */}
+      <Modal
+        open={!!selected}
+        onClose={() => { setSelected(null); setRejectReason(''); }}
+        size="md"
+        icon={<XCircle size={20} />}
+        iconColor="bg-rose-50 border-rose-200 text-rose-600"
+        title="Rechazar solicitud"
+        subtitle={selected ? (() => {
+          const r = filtered.find(x => x.id === selected);
+          return r ? `${r.code} — ${getStudentName(r)}` : '';
+        })() : ''}
+        footer={
+          <>
+            <button
+              onClick={() => { setSelected(null); setRejectReason(''); }}
+              className="btn-secondary px-5 py-2.5 text-sm"
             >
-              {/* Header */}
-              <div className="px-6 py-5 border-b border-slate-100 flex items-center gap-3">
-                <div className="w-10 h-10 rounded-xl bg-rose-50 border border-rose-200 flex items-center justify-center shrink-0">
-                  <XCircle size={20} className="text-rose-600" />
-                </div>
-                <div>
-                  <h3 className="text-base font-bold text-slate-900">Rechazar solicitud</h3>
-                  <p className="text-xs text-slate-500 mt-0.5">
-                    {rejectReq.code} — {getStudentName(rejectReq)}
-                  </p>
-                </div>
-              </div>
-
-              {/* Content */}
-              <div className="px-6 py-5">
-                <label className="block text-sm font-bold text-slate-700 mb-2">
-                  Motivo de rechazo
-                </label>
-                <textarea
-                  className="input w-full resize-none"
-                  rows={4}
-                  value={rejectReason}
-                  onChange={e => setRejectReason(e.target.value)}
-                  placeholder="Indica el motivo del rechazo..."
-                  autoFocus
-                />
-              </div>
-
-              {/* Footer */}
-              <div className="px-6 py-4 bg-slate-50/70 border-t border-slate-100 flex items-center justify-end gap-3">
-                <button
-                  onClick={() => { setSelected(null); setRejectReason(''); }}
-                  className="btn-secondary px-5 py-2.5 text-sm"
-                >
-                  Cancelar
-                </button>
-                <button
-                  onClick={() => handleReject(selected)}
-                  disabled={!rejectReason.trim()}
-                  className="btn-danger px-5 py-2.5 text-sm"
-                >
-                  Rechazar solicitud
-                </button>
-              </div>
-            </div>
-          </div>
-        );
-      })()}
-
-      {/* ── Centralized Delete Confirmation (popup emergente) ── */}
-      {deleteConfirmId && (() => {
-        const delReq = filtered.find(r => r.id === deleteConfirmId);
-        if (!delReq) return null;
-        return (
-          <div
-            className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4 animate-fade-in"
-            onClick={() => setDeleteConfirmId(null)}
-          >
-            <div
-              className="bg-white rounded-3xl shadow-2xl w-full max-w-md overflow-hidden animate-scale-in"
-              onClick={e => e.stopPropagation()}
+              Cancelar
+            </button>
+            <button
+              onClick={() => { if (selected) handleReject(selected); }}
+              disabled={!rejectReason.trim()}
+              className="btn-danger px-5 py-2.5 text-sm"
             >
-              {/* Header */}
-              <div className="px-6 py-5 border-b border-slate-100 flex items-center gap-3">
-                <div className="w-10 h-10 rounded-xl bg-rose-50 border border-rose-200 flex items-center justify-center shrink-0">
-                  <AlertTriangle size={20} className="text-rose-600" />
-                </div>
-                <div>
-                  <h3 className="text-base font-bold text-slate-900">Eliminar solicitud</h3>
-                  <p className="text-xs text-slate-500 mt-0.5">
-                    {delReq.code} — {getStudentName(delReq)}
-                  </p>
-                </div>
-              </div>
+              Rechazar solicitud
+            </button>
+          </>
+        }
+      >
+        <label className="block text-sm font-bold text-slate-700 mb-2">
+          Motivo de rechazo
+        </label>
+        <textarea
+          className="input w-full resize-none"
+          rows={4}
+          value={rejectReason}
+          onChange={e => setRejectReason(e.target.value)}
+          placeholder="Indica el motivo del rechazo..."
+          autoFocus
+        />
+      </Modal>
 
-              {/* Content */}
-              <div className="px-6 py-5">
-                <div className="bg-rose-50/70 rounded-xl p-4 border border-rose-100">
-                  <p className="text-sm text-rose-700/80 leading-relaxed">
-                    ¿Estás seguro de eliminar la solicitud <strong>{delReq.code}</strong>?
-                  </p>
-                  <p className="text-xs text-rose-500/70 mt-2">
-                    Esta acción no se puede deshacer. Se eliminará permanentemente la solicitud y todos sus datos asociados.
-                  </p>
-                </div>
-              </div>
-
-              {/* Footer */}
-              <div className="px-6 py-4 bg-slate-50/70 border-t border-slate-100 flex items-center justify-end gap-3">
-                <button
-                  onClick={() => setDeleteConfirmId(null)}
-                  className="btn-secondary px-5 py-2.5 text-sm"
-                >
-                  Cancelar
-                </button>
-                <button
-                  onClick={() => handleDeleteRequest(deleteConfirmId)}
-                  disabled={deleting}
-                  className="btn-danger px-5 py-2.5 text-sm"
-                >
-                  {deleting ? 'Eliminando...' : 'Eliminar solicitud'}
-                </button>
-              </div>
-            </div>
-          </div>
-        );
-      })()}
-
-      {/* ── Centralized Revoke Modal (popup emergente) ── */}
-      {revokeSelectedId && (() => {
-        const revokeReq = filtered.find(r => r.id === revokeSelectedId);
-        if (!revokeReq) return null;
-        return (
-          <div
-            className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4 animate-fade-in"
-            onClick={() => { setRevokeSelectedId(null); setRevokeReason(''); }}
-          >
-            <div
-              className="bg-white rounded-3xl shadow-2xl w-full max-w-md overflow-hidden animate-scale-in"
-              onClick={e => e.stopPropagation()}
+      {/* ── Centralized Delete Confirmation ── */}
+      <Modal
+        open={!!deleteConfirmId}
+        onClose={() => setDeleteConfirmId(null)}
+        size="md"
+        icon={<AlertTriangle size={20} />}
+        iconColor="bg-rose-50 border-rose-200 text-rose-600"
+        title="Eliminar solicitud"
+        subtitle={deleteConfirmId ? (() => {
+          const r = filtered.find(x => x.id === deleteConfirmId);
+          return r ? `${r.code} — ${getStudentName(r)}` : '';
+        })() : ''}
+        footer={
+          <>
+            <button
+              onClick={() => setDeleteConfirmId(null)}
+              className="btn-secondary px-5 py-2.5 text-sm"
             >
-              {/* Header */}
-              <div className="px-6 py-5 border-b border-slate-100 flex items-center gap-3">
-                <div className="w-10 h-10 rounded-xl bg-amber-50 border border-amber-200 flex items-center justify-center shrink-0">
-                  <AlertTriangle size={20} className="text-amber-600" />
-                </div>
-                <div>
-                  <h3 className="text-base font-bold text-slate-900">Revocar firma</h3>
-                  <p className="text-xs text-slate-500 mt-0.5">
-                    {revokeReq.code} — {getStudentName(revokeReq)}
-                  </p>
-                </div>
-              </div>
+              Cancelar
+            </button>
+            <button
+              onClick={() => { if (deleteConfirmId) handleDeleteRequest(deleteConfirmId); }}
+              disabled={deleting}
+              className="btn-danger px-5 py-2.5 text-sm"
+            >
+              {deleting ? 'Eliminando...' : 'Eliminar solicitud'}
+            </button>
+          </>
+        }
+      >
+        <div className="bg-rose-50/70 rounded-xl p-4 border border-rose-100">
+          <p className="text-sm text-rose-700/80 leading-relaxed">
+            ¿Estás seguro de eliminar esta solicitud?
+          </p>
+          <p className="text-xs text-rose-500/70 mt-2">
+            Esta acción no se puede deshacer. Se eliminará permanentemente la solicitud y todos sus datos asociados.
+          </p>
+        </div>
+      </Modal>
 
-              {/* Content */}
-              <div className="px-6 py-5 space-y-4">
-                <div className="bg-amber-50/70 rounded-xl p-4 border border-amber-100">
-                  <p className="text-xs text-amber-700/80 leading-relaxed">
-                    Al revocar la firma, el certificado quedará marcado como <strong>revocado</strong> en el portal de validación y la firma dejará de mostrarse.
-                    Esta acción no se puede deshacer.
-                  </p>
-                </div>
-
-                <div>
-                  <label className="block text-sm font-bold text-slate-700 mb-2">
-                    Motivo de revocación
-                  </label>
-                  <textarea
-                    className="input w-full resize-none"
-                    rows={4}
-                    value={revokeReason}
-                    onChange={e => setRevokeReason(e.target.value)}
-                    placeholder="Indica el motivo para revocar la firma..."
-                    autoFocus
-                  />
-                </div>
-              </div>
-
-              {/* Footer */}
-              <div className="px-6 py-4 bg-slate-50/70 border-t border-slate-100 flex items-center justify-end gap-3">
-                <button
-                  onClick={() => { setRevokeSelectedId(null); setRevokeReason(''); }}
-                  className="btn-secondary px-5 py-2.5 text-sm"
-                >
-                  Cancelar
-                </button>
-                <button
-                  onClick={() => {
-                    const id = revokeSelectedId;
-                    if (id) handleRevoke(id);
-                  }}
-                  disabled={!revokeReason.trim()}
-                  className="btn-danger px-5 py-2.5 text-sm"
-                >
-                  Revocar firma
-                </button>
-              </div>
-            </div>
-          </div>
-        );
-      })()}
+      {/* ── Centralized Revoke Modal ── */}
+      <Modal
+        open={!!revokeSelectedId}
+        onClose={() => { setRevokeSelectedId(null); setRevokeReason(''); }}
+        size="md"
+        icon={<AlertTriangle size={20} />}
+        iconColor="bg-amber-50 border-amber-200 text-amber-600"
+        title="Revocar firma"
+        subtitle={revokeSelectedId ? (() => {
+          const r = filtered.find(x => x.id === revokeSelectedId);
+          return r ? `${r.code} — ${getStudentName(r)}` : '';
+        })() : ''}
+        footer={
+          <>
+            <button
+              onClick={() => { setRevokeSelectedId(null); setRevokeReason(''); }}
+              className="btn-secondary px-5 py-2.5 text-sm"
+            >
+              Cancelar
+            </button>
+            <button
+              onClick={() => { const id = revokeSelectedId; if (id) handleRevoke(id); }}
+              disabled={!revokeReason.trim()}
+              className="btn-danger px-5 py-2.5 text-sm"
+            >
+              Revocar firma
+            </button>
+          </>
+        }
+      >
+        <div className="bg-amber-50/70 rounded-xl p-4 border border-amber-100 mb-4">
+          <p className="text-xs text-amber-700/80 leading-relaxed">
+            Al revocar la firma, el certificado quedará marcado como <strong>revocado</strong> en el portal de validación y la firma dejará de mostrarse.
+            Esta acción no se puede deshacer.
+          </p>
+        </div>
+        <label className="block text-sm font-bold text-slate-700 mb-2">
+          Motivo de revocación
+        </label>
+        <textarea
+          className="input w-full resize-none"
+          rows={4}
+          value={revokeReason}
+          onChange={e => setRevokeReason(e.target.value)}
+          placeholder="Indica el motivo para revocar la firma..."
+          autoFocus
+        />
+      </Modal>
     </div>
   );
 }

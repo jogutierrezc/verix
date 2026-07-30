@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { useAuth } from './hooks/useAuth';
 import { Layout } from './components/layout/Layout';
@@ -18,6 +19,7 @@ import { ReportsPage } from './pages/reports/ReportsPage';
 import { SignMinutePage } from './pages/minutes/SignMinutePage';
 import { MinutesPage } from './pages/minutes/MinutesPage';
 import { LoadingScreen } from './components/ui/LoadingScreen';
+import { getRobotoFontData } from './lib/pdfFonts';
 
 function PrivateRoute({ children, roles }: { children: React.ReactNode; roles?: string[] }) {
   const { user, isLoading } = useAuth();
@@ -31,6 +33,17 @@ function PrivateRoute({ children, roles }: { children: React.ReactNode; roles?: 
 
 export default function App() {
   const { user, isLoading } = useAuth();
+
+  // ── Preload Roboto font for PDF generation ──
+  useEffect(() => {
+    getRobotoFontData().then(fontData => {
+      if (fontData) {
+        console.log('✅ Roboto font preloaded for PDF generation');
+      } else {
+        console.log('ℹ️ Roboto font not available, PDFs will use Helvetica');
+      }
+    });
+  }, []);
 
   if (isLoading) return <LoadingScreen />;
 

@@ -188,12 +188,20 @@ const FONT_MAP: Record<string, string> = {
   consolas: 'Courier',
 };
 
+// Flag set to true once Roboto fonts are successfully registered
+let robotoReady = false;
+
 function mapFont(fontFamily?: string): string {
-  if (!fontFamily) return 'Roboto';
-  return FONT_MAP[fontFamily.toLowerCase().trim()] || 'Roboto';
+  if (!fontFamily) return robotoReady ? 'Roboto' : 'Helvetica';
+  const mapped = FONT_MAP[fontFamily.toLowerCase().trim()];
+  if (!mapped) return robotoReady ? 'Roboto' : 'Helvetica';
+  // If mapped to Roboto but Roboto isn't loaded, use Helvetica
+  if (mapped === 'Roboto' && !robotoReady) return 'Helvetica';
+  return mapped;
 }
 
 function mapFontStyle(bold?: boolean, italic?: boolean): string {
+  if (!robotoReady) return 'normal'; // Helvetica only has 'normal'
   if (bold && italic) return 'bolditalic';
   if (bold) return 'bold';
   if (italic) return 'italic';
@@ -243,13 +251,20 @@ export async function renderTemplateToPdf(
   const orientation = pageOrientation === 'landscape' ? 'l' : 'p';
   const pdf = new jsPDF(orientation, 'pt', [pageWidth, pageHeight]);
 
-  // ── Register Roboto font (fetched once from Google Fonts CDN) ──
+  // ── Register Roboto font (fetched once from Google Fonts CSS2 API) ──
+  // If Roboto fails to load, Helvetica is used as fallback by jsPDF
   try {
     const fontData = await getRobotoFontData();
-    registerRobotoFonts(pdf, fontData);
-    pdf.setFont('Roboto', 'normal');
+    if (fontData) {
+      registerRobotoFonts(pdf, fontData);
+      pdf.setFont('Roboto', 'normal');
+      robotoReady = true;
+    } else {
+      pdf.setFont('Helvetica', 'normal');
+    }
   } catch (e) {
-    console.warn('⚠️ No se pudo cargar Roboto, usando fuente por defecto:', e);
+    console.warn('⚠️ No se pudo cargar Roboto, usando Helvetica:', e);
+    pdf.setFont('Helvetica', 'normal');
   }
 
   // ── Match preview CSS constants ──
@@ -634,9 +649,34 @@ export function CertificatePreview({
     }
   };
 
-  /** Descarga el PDF regenerado con la firma electrónica (sobre la marcha) */
+  /** Descarga el PDF firmado: primero intenta desde certificate_url, luego regenera on-the-fly */
   const handleDownloadSigned = async () => {
     try {
+      // ── Priority 1: Download from stored certificate_url (more reliable) ──
+      if (request?.certificate_url && (request?.status === 'APPROVED' || request?.status === 'SIGNED')) {
+        toast.loading('Descargando PDF firmado...', { id: 'pdf-sign' });
+        try {
+          const response = await fetch(request.certificate_url);
+          if (response.ok) {
+            const blob = await response.blob();
+            const link = document.createElement('a');
+            const objectUrl = URL.createObjectURL(blob);
+            link.href = objectUrl;
+            link.download = `certificado-${requestCode || requestId.substring(0, 8)}-firmado.pdf`;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            URL.revokeObjectURL(objectUrl);
+            toast.success('✅ PDF con firma electrónica descargado', { id: 'pdf-sign' });
+            return;
+          }
+          console.warn(`⚠️ Error descargando PDF desde URL, generando on-the-fly: ${response.status}`);
+        } catch (fetchErr) {
+          console.warn('⚠️ Falló descarga desde URL, generando on-the-fly:', fetchErr);
+        }
+      }
+
+      // ── Priority 2: Generate PDF on-the-fly (fallback) ──
       toast.loading('Generando PDF con firma electrónica...', { id: 'pdf-sign' });
 
       let selectedSig: { signature_image_url?: string } | null = null;
