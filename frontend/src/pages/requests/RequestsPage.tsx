@@ -61,9 +61,7 @@ export function RequestsPage() {
   const [loadingBatch, setLoadingBatch] = useState<string | null>(null);
 
   const fetchBatchItems = async (batchId: string): Promise<any[]> => {
-    // Return from cache if already loaded
-    if (batchItemsCache.has(batchId)) return batchItemsCache.get(batchId)!;
-
+    // Siempre traer datos frescos de la BD (sin cache)
     setLoadingBatch(batchId);
     try {
       let query = supabase
@@ -509,6 +507,11 @@ export function RequestsPage() {
       setSelected(null);
       setRejectReason('');
       loadRequests();
+
+      // ── Refrescar datos del lote desde la BD para garantizar vista actualizada ──
+      if (targetReq?.batch_id) {
+        fetchBatchItems(targetReq.batch_id);
+      }
     } catch (err: any) {
       toast.error(err.message);
     }
@@ -620,6 +623,11 @@ export function RequestsPage() {
 
       toast.success('Solicitud aprobada');
       loadRequests();
+
+      // ── Refrescar datos del lote desde la BD para garantizar vista actualizada ──
+      if (affectedBatchId) {
+        fetchBatchItems(affectedBatchId);
+      }
     } catch (err: any) {
       toast.error(err.message || 'Error al aprobar la solicitud');
       console.error('❌ Approve single request error:', err);
