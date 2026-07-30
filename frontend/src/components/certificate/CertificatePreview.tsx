@@ -446,7 +446,7 @@ export async function renderTemplateToPdf(
 
             if (align === 'justify' && !isLastLine && line.includes(' ')) {
               const words = line.trim().split(/\s+/);
-              const wordsWidth = words.reduce((sum, word) => sum + pdf.getTextWidth(word), 0);
+              const wordsWidth = words.reduce((sum: number, word: string) => sum + pdf.getTextWidth(word), 0);
               const totalGap = maxTextWidth - wordsWidth;
               const gapBetween = words.length > 1 ? totalGap / (words.length - 1) : 0;
 
