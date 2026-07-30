@@ -397,12 +397,13 @@ export async function renderTemplateToPdf(
         pdf.setTextColor(rgb[0], rgb[1], rgb[2]);
 
         const maxTextWidth = Math.max(1, w - PAD_X * 2);
+        const lineHeight = fontSize * LINE_HEIGHT;
 
         // Split text into lines respecting maxWidth (matching preview's wordBreak)
         const lines = pdf.splitTextToSize(content, maxTextWidth);
 
-        // Calculate actual text block height (lineHeight * fontSize per line)
-        const textBlockHeight = lines.length > 0 ? lines.length * fontSize * LINE_HEIGHT : 0;
+        // Calculate actual text block height (lineHeight * number of lines)
+        const textBlockHeight = lines.length > 0 ? lines.length * lineHeight : 0;
         const availableHeight = h - PAD_Y * 2;
 
         // Vertical centering: Y = top padding + remaining space / 2
@@ -414,90 +415,45 @@ export async function renderTemplateToPdf(
           textY = y + PAD_Y;
         }
 
-        // Determine X position based on alignment
-        let textX: number;
-        // 'justify' is not a jsPDF native align, so we handle it manually below
+        // Determine alignment-specific X coordinate for the text block
         const textAlign: 'left' | 'center' | 'right' = align === 'justify' ? 'left' : align;
-        if (align === 'center') {
-          textX = x + w / 2;
-        } else if (align === 'right') {
-          textX = x + w - PAD_X;
-        } else {
-          // left / justify preview uses text-align: left + justifyContent flex-start
-          textX = x + PAD_X;
-        }
+        const baseX = align === 'center'
+          ? x + w / 2
+          : align === 'right'
+            ? x + w - PAD_X
+            : x + PAD_X;
 
-        // Render each line with proper spacing (matches preview's lineHeight: 1.2)
         if (lines.length > 0) {
           for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
             const line = lines[lineIdx];
+            const isLastLine = lineIdx === lines.length - 1;
 
-            if (align === 'justify') {
-              const isLastLine = lineIdx === lines.length - 1;
-              const isSingleLine = lines.length === 1;
+            if (align === 'justify' && !isLastLine && line.includes(' ')) {
+              const words = line.trim().split(/\s+/);
+              const wordsWidth = words.reduce((sum, word) => sum + pdf.getTextWidth(word), 0);
+              const totalGap = maxTextWidth - wordsWidth;
+              const gapBetween = words.length > 1 ? totalGap / (words.length - 1) : 0;
 
-              if (isLastLine && !isSingleLine) {
-                // Last line of a multi-line paragraph: left-aligned (correct typography)
-                pdf.text(line, textX, textY, { baseline: 'top' });
-              } else {
-                // Single line OR non-last line: apply justification
-                const words = line.split(' ');
-                if (words.length > 1) {
-                  // Calculate total width of all words without spaces
-                  let wordsWidth = 0;
-                  for (const word of words) {
-                    wordsWidth += pdf.getTextWidth(word);
+              if (words.length > 1 && gapBetween > 0) {
+                let currentX = baseX;
+                for (let wIdx = 0; wIdx < words.length; wIdx++) {
+                  pdf.text(words[wIdx], currentX, textY, { baseline: 'top' });
+                  if (wIdx < words.length - 1) {
+                    currentX += pdf.getTextWidth(words[wIdx]) + gapBetween;
                   }
-                  // Calculate the gap to add between each word to fill the full width
-                  const totalGap = maxTextWidth - wordsWidth;
-                  let gapBetween = totalGap / (words.length - 1);
-
-                  // ── Constrain gap to preserve design layout ──
-                  const normalSpace = pdf.getTextWidth(' ');
-                  const MIN_GAP = normalSpace * 0.5;
-                  const MAX_GAP = Math.max(fontSize * 0.6, normalSpace * 2);
-
-                  let useJustify = true;
-
-                  if (gapBetween < MIN_GAP) {
-                    // Gap too small — check if MIN_GAP causes overflow
-                    const forcedWidth = wordsWidth + MIN_GAP * (words.length - 1);
-                    if (forcedWidth > maxTextWidth) {
-                      useJustify = false;
-                    } else {
-                      gapBetween = MIN_GAP;
-                    }
-                  } else if (gapBetween > MAX_GAP) {
-                    // Gap too large — text would look stretched
-                    useJustify = false;
-                  }
-
-                  if (useJustify) {
-                    let currentX = textX;
-                    for (let wIdx = 0; wIdx < words.length; wIdx++) {
-                      pdf.text(words[wIdx], currentX, textY, { baseline: 'top' });
-                      if (wIdx < words.length - 1) {
-                        currentX += pdf.getTextWidth(words[wIdx]) + gapBetween;
-                      }
-                    }
-                  } else {
-                    // Fallback: left-aligned
-                    pdf.text(line, textX, textY, { baseline: 'top' });
-                  }
-                } else {
-                  // Single word — left-aligned
-                  pdf.text(line, textX, textY, { baseline: 'top' });
                 }
+              } else {
+                pdf.text(line, baseX, textY, { maxWidth: maxTextWidth, align: 'left', baseline: 'top' });
               }
             } else {
-              pdf.text(line, textX, textY, {
+              pdf.text(line, baseX, textY, {
                 maxWidth: maxTextWidth,
                 align: textAlign,
                 baseline: 'top',
               });
             }
 
-            textY += fontSize * LINE_HEIGHT;
+            textY += lineHeight;
           }
         }
       }

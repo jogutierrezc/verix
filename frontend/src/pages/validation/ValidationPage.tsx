@@ -377,12 +377,13 @@ export function ValidationPage() {
   const signedPdfUrl = request?.certificate_url || null;
   const hasSignedPdf = Boolean(signedPdfUrl);
   const isSignedStatus = request?.status === 'SIGNED';
-  const isSignedOrHasPdf = hasSignedPdf || isSignedStatus;
-  const canDownloadSignedPdf = hasSignedPdf;
 
   // Certificate rendering config
   const rawConfig = templateConfig || {};
   const elements: any[] = rawConfig?.elements || [];
+  const hasTemplateElements = elements.length > 0;
+  const canDownloadPdf = hasTemplateElements || hasSignedPdf || isSignedStatus;
+  const canDownloadSignedPdf = hasSignedPdf;
   const pageOrientation = rawConfig?.orientation || 'landscape';
   const pageSizeName: PageSizeName = rawConfig?.pageSize || 'A4';
   const { width: pageWidth, height: pageHeight } = getPageDimensions(pageSizeName, pageOrientation);
@@ -425,6 +426,23 @@ export function ValidationPage() {
   const handleDownloadPdf = async () => {
     setPdfLoading(true);
     try {
+      if (hasTemplateElements) {
+        toast.loading('Generando PDF fiel a la plantilla...', { id: 'validate-pdf' });
+
+        const pdf = await renderTemplateToPdf(
+          elements,
+          pageOrientation,
+          pageWidth,
+          pageHeight,
+          requestData,
+          selectedSignature,
+        );
+
+        pdf.save(`certificado-${requestCode || verificationCode}.pdf`);
+        toast.success('✅ PDF descargado exitosamente', { id: 'validate-pdf' });
+        return;
+      }
+
       if (canDownloadSignedPdf && request?.certificate_url) {
         toast.loading('Descargando PDF firmado...', { id: 'validate-pdf' });
         await downloadFileFromUrl(request.certificate_url, `certificado-${requestCode || verificationCode}-firmado.pdf`);
@@ -432,23 +450,8 @@ export function ValidationPage() {
         return;
       }
 
-      if (!request?.certificate_url) {
-        toast.error('No se encontró un PDF firmado. Generando una copia del certificado.', { id: 'validate-pdf' });
-      } else {
-        toast.loading('Generando PDF vectorial...', { id: 'validate-pdf' });
-      }
-
-      const pdf = await renderTemplateToPdf(
-        elements,
-        pageOrientation,
-        pageWidth,
-        pageHeight,
-        requestData,
-        selectedSignature,
-      );
-
-      pdf.save(`certificado-${requestCode || verificationCode}.pdf`);
-      toast.success('✅ PDF descargado exitosamente', { id: 'validate-pdf' });
+      toast.error('No hay plantilla disponible para generar el PDF y tampoco se encontró un archivo firmado.', { id: 'validate-pdf' });
+      return;
     } catch (err: any) {
       toast.error('Error al generar PDF: ' + (err.message || ''), { id: 'validate-pdf' });
     } finally {
@@ -667,9 +670,9 @@ export function ValidationPage() {
 
               {/* Status Card */}
               <div className={`bg-white rounded-3xl border shadow-xl shadow-slate-100 overflow-hidden relative ${
-                isSignedOrHasPdf ? 'border-emerald-200/80' : 'border-slate-200'
+                canDownloadPdf ? 'border-emerald-200/80' : 'border-slate-200'
               }`}>
-                <div className={`h-2 w-full ${isSignedOrHasPdf ? 'bg-gradient-to-r from-emerald-500 to-teal-400' : 'bg-slate-400'}`} />
+                <div className={`h-2 w-full ${canDownloadPdf ? 'bg-gradient-to-r from-emerald-500 to-teal-400' : 'bg-slate-400'}`} />
 
                 <div className="p-6">
                   <div className="flex items-start gap-4">
@@ -942,7 +945,7 @@ export function ValidationPage() {
 
                   <button
                     onClick={handleDownloadPdf}
-                    disabled={pdfLoading || !isSignedOrHasPdf}
+                    disabled={pdfLoading || !canDownloadPdf}
                     className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-6 py-3 bg-gradient-to-r from-emerald-600 to-teal-500 hover:from-emerald-700 hover:to-teal-600 text-white font-bold rounded-xl transition-all shadow-lg shadow-emerald-950/40 disabled:opacity-50 disabled:cursor-not-allowed hover:-translate-y-0.5 active:translate-y-0 text-sm"
                   >
                     {pdfLoading ? (
