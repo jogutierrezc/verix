@@ -1249,6 +1249,101 @@ export function RequestsPage() {
     }
   };
 
+  // ── Download batch data as Excel (for applicant editing) ──
+  const downloadBatchAsExcel = (batchId: string, batchReqs: any[]) => {
+    if (batchReqs.length === 0) {
+      toast.error('No hay solicitudes en este lote');
+      return;
+    }
+
+    try {
+      // Get all unique data keys from all items
+      const allDataKeys = new Set<string>();
+      batchReqs.forEach(req => {
+        if (req.data) Object.keys(req.data).forEach(k => allDataKeys.add(k));
+      });
+      const dataKeys = Array.from(allDataKeys);
+
+      // Build rows with code + all data fields
+      const rows = batchReqs.map((req, idx) => {
+        const row: Record<string, string> = {
+          '#': String(idx + 1),
+          'Código': req.code || '',
+          'Estado': req.status || '',
+        };
+        dataKeys.forEach(key => {
+          row[key.replace(/_/g, ' ')] = req.data?.[key] || '';
+        });
+        return row;
+      });
+
+      const ws = XLSX.utils.json_to_sheet(rows);
+
+      // Set column widths
+      const cols = Object.keys(rows[0] || {});
+      ws['!cols'] = cols.map(c => ({ wch: Math.max(c.length + 3, 15) }));
+
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Lote');
+
+      const batchCode = batchReqs[0]?.code?.substring(0, 10) || batchId.substring(0, 8);
+      XLSX.writeFile(wb, `lote-${batchCode}-datos.xlsx`);
+      toast.success('✅ Excel del lote descargado');
+    } catch (err: any) {
+      console.error('Error generando Excel:', err);
+      toast.error('Error al generar el Excel del lote');
+    }
+  };
+
+  // ── Export all applicant requests as Excel (for non-approved too) ──
+  const downloadRequestsAsExcel = () => {
+    if (requests.length === 0) {
+      toast.error('No hay solicitudes para exportar');
+      return;
+    }
+
+    try {
+      // Get all unique data keys from all requests
+      const allDataKeys = new Set<string>();
+      requests.forEach(req => {
+        if (req.data) Object.keys(req.data).forEach(k => allDataKeys.add(k));
+      });
+      const dataKeys = Array.from(allDataKeys);
+
+      // Build rows
+      const rows = requests.map((req, idx) => {
+        const row: Record<string, string> = {
+          '#': String(idx + 1),
+          'Código': req.code || '',
+          'Estado': statusConfig[req.status]?.label || req.status,
+          'Plantilla': req.template?.name || '—',
+          'Fecha': format(new Date(req.created_at), 'dd/MM/yyyy HH:mm'),
+          'Lote': req.batch_id ? `#${req.batch_id.substring(0, 6).toUpperCase()}` : '—',
+        };
+        dataKeys.forEach(key => {
+          row[key.replace(/_/g, ' ')] = req.data?.[key] || '';
+        });
+        return row;
+      });
+
+      const ws = XLSX.utils.json_to_sheet(rows);
+
+      // Set column widths
+      const cols = Object.keys(rows[0] || {});
+      ws['!cols'] = cols.map(c => ({ wch: Math.max(c.length + 3, 15) }));
+
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Solicitudes');
+
+      const statusSuffix = statusFilter ? `-${statusConfig[statusFilter]?.label?.toLowerCase() || statusFilter}` : '';
+      XLSX.writeFile(wb, `solicitudes${statusSuffix}-${format(new Date(), 'yyyy-MM-dd')}.xlsx`);
+      toast.success(`✅ ${requests.length} solicitudes exportadas a Excel`);
+    } catch (err: any) {
+      console.error('Error exportando Excel:', err);
+      toast.error('Error al exportar a Excel');
+    }
+  };
+
   return (      <div className="max-w-screen-2xl mx-auto px-4 md:px-6 xl:px-8 space-y-6 animate-fade-in min-h-screen pb-24 md:pb-12">
       {/* Header */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
@@ -1305,6 +1400,14 @@ export function RequestsPage() {
           )}
           {user?.role === 'APPLICANT' && (
             <>
+              <button
+                onClick={downloadRequestsAsExcel}
+                disabled={requests.length === 0}
+                className="btn-secondary btn-sm text-xs h-10"
+                title="Exportar todas las solicitudes visibles a Excel"
+              >
+                <Table size={16} /> Exportar Excel
+              </button>
               <button
                 onClick={downloadSelectedCertificates}
                 disabled={downloading || (selectedRequestIds.length === 0 ? eligibleDownloadRequests.length === 0 : selectedDownloadableCount === 0)}
@@ -1675,6 +1778,13 @@ export function RequestsPage() {
                   {/* Applicant: edit batch via Excel */}
                   {user?.role === 'APPLICANT' && displayItems.some((r: any) => EDITABLE_STATUSES.includes(r.status)) && (
                     <>
+                      <button
+                        onClick={async (e) => { e.stopPropagation(); const cachedItems = batchItemsCache.get(batchId); const items = cachedItems || await fetchBatchItems(batchId); downloadBatchAsExcel(batchId, items); }}
+                        className="btn-secondary btn-xs px-3 py-1.5 text-xs"
+                        title="Descargar datos del lote como Excel para editarlos"
+                      >
+                        <Table size={14} /> Descargar Excel
+                      </button>
                       <button
                         onClick={(e) => { e.stopPropagation(); openBatchEditModal(batchId); }}
                         className="btn-secondary btn-xs px-3 py-1.5 text-xs"
@@ -2102,12 +2212,20 @@ export function RequestsPage() {
                       onChange={handleBatchEditFileUpload}
                       className="hidden"
                     />
-                    <button
-                      onClick={() => batchEditFileInputRef.current?.click()}
-                      className="btn-primary px-8 py-3"
-                    >
-                      <Upload size={18} /> Seleccionar archivo
-                    </button>
+                    <div className="flex flex-wrap items-center justify-center gap-3">
+                      <button
+                        onClick={() => batchEditFileInputRef.current?.click()}
+                        className="btn-primary px-8 py-3"
+                      >
+                        <Upload size={18} /> Seleccionar archivo
+                      </button>
+                      <button
+                        onClick={() => downloadBatchAsExcel(batchEditBatchId!, batchEditRequests)}
+                        className="btn-secondary px-8 py-3"
+                      >
+                        <Download size={18} /> Descargar datos actuales
+                      </button>
+                    </div>
                   </div>
                 </div>
               ) : (
