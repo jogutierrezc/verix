@@ -486,6 +486,26 @@ export function RequestsPage() {
         .update({ status: 'REJECTED', reviewed_by: user?.id, reviewed_at: new Date().toISOString(), rejection_reason: rejectReason })
         .eq('id', id);
       if (error) throw error;
+
+      // ── Invalidate batch cache so expanded batch view reflects the change ──
+      const targetReq = requests.find(r => r.id === id) || batchRequests.find(r => r.id === id);
+      if (targetReq?.batch_id) {
+        setBatchItemsCache(prev => {
+          const next = new Map(prev);
+          const cached = next.get(targetReq.batch_id);
+          if (cached) {
+            next.set(targetReq.batch_id, cached.map(item =>
+              item.id === id
+                ? { ...item, status: 'REJECTED', reviewed_by: user?.id, reviewed_at: new Date().toISOString(), rejection_reason: rejectReason }
+                : item
+            ));
+          } else {
+            next.delete(targetReq.batch_id);
+          }
+          return next;
+        });
+      }
+
       toast.success('Solicitud rechazada');
       setSelected(null);
       setRejectReason('');
@@ -581,6 +601,24 @@ export function RequestsPage() {
       // ── Generate radicado (consecutive_number) for this request ──
       if (targetReq?.template_id) {
         await generateRadicadoForRequest(id, targetReq.template_id);
+      }
+
+      // ── Invalidate batch cache so expanded batch view reflects the change ──
+      const affectedBatchId = targetReq?.batch_id;
+      if (affectedBatchId) {
+        setBatchItemsCache(prev => {
+          const next = new Map(prev);
+          const cached = next.get(affectedBatchId);
+          if (cached) {
+            // Update the item in-place for immediate UI feedback
+            next.set(affectedBatchId, cached.map(item =>
+              item.id === id ? { ...item, ...updateData } : item
+            ));
+          } else {
+            next.delete(affectedBatchId);
+          }
+          return next;
+        });
       }
 
       toast.success('Solicitud aprobada');
