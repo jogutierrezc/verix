@@ -197,6 +197,7 @@ export function ValidationPage() {
   const [error, setError] = useState<string | null>(null);
   const [pdfLoading, setPdfLoading] = useState(false);
   const [institutionData, setInstitutionData] = useState<{ name: string; logo_url: string | null } | null>(null);
+  const [reviewerSignatureUrl, setReviewerSignatureUrl] = useState<string | null>(null);
   const [copiedCode, setCopiedCode] = useState(false);
   const [copiedLink, setCopiedLink] = useState(false);
 
@@ -214,6 +215,49 @@ export function ValidationPage() {
       setLoading(false);
     }
   }, [codeParam, location.search]);
+
+  useEffect(() => {
+    const loadReviewerSignatureFallback = async () => {
+      if (!request?.reviewed_by) {
+        setReviewerSignatureUrl(null);
+        return;
+      }
+
+      let reviewerInfo: any = null;
+      if (request?.reviewer_notes) {
+        try {
+          reviewerInfo = JSON.parse(request.reviewer_notes);
+        } catch {
+          reviewerInfo = { signature_name: request.reviewer_notes };
+        }
+      }
+
+      if (reviewerInfo?.signature_url) {
+        setReviewerSignatureUrl(null);
+        return;
+      }
+
+      try {
+        const { data: signer, error } = await supabase
+          .from('authorized_signatures')
+          .select('signature_image_url')
+          .eq('user_id', request.reviewed_by)
+          .eq('is_active', true)
+          .limit(1)
+          .maybeSingle();
+
+        if (!error && signer?.signature_image_url) {
+          setReviewerSignatureUrl(signer.signature_image_url);
+        } else {
+          setReviewerSignatureUrl(null);
+        }
+      } catch {
+        setReviewerSignatureUrl(null);
+      }
+    };
+
+    loadReviewerSignatureFallback();
+  }, [request]);
 
   const loadCertificate = async (effectiveCode: string) => {
     setLoading(true);
@@ -249,7 +293,7 @@ export function ValidationPage() {
         const { data: directData } = await supabase
           .from('certificate_requests')
           .select('*, user:users!certificate_requests_user_id_fkey(first_name, last_name, document_id)')
-          .or(`code.eq.${effectiveCode},consecutive_number.eq.${effectiveCode},verification_code.eq.${effectiveCode},user.document_id.eq.${effectiveCode}`)
+          .or(`code.eq.${effectiveCode},consecutive_number.eq.${effectiveCode},verification_code.eq.${effectiveCode},user.document_id.eq.${effectiveCode},data->>documento_estudiante.eq.${effectiveCode},data->>document_id.eq.${effectiveCode},data->>documento.eq.${effectiveCode}`)
           .maybeSingle();
 
         if (directData) {
@@ -326,9 +370,15 @@ export function ValidationPage() {
   }
 
   // Derived selected signature for PDF generation (matches renderTemplateToPdf interface)
-  const selectedSignature = reviewerInfo?.signature_url
-    ? { signature_image_url: reviewerInfo.signature_url }
+  const selectedSignature = (reviewerInfo?.signature_url || reviewerSignatureUrl)
+    ? { signature_image_url: reviewerInfo?.signature_url || reviewerSignatureUrl }
     : null;
+
+  const signedPdfUrl = request?.certificate_url || null;
+  const hasSignedPdf = Boolean(signedPdfUrl);
+  const isSignedStatus = request?.status === 'SIGNED';
+  const isSignedOrHasPdf = hasSignedPdf || isSignedStatus;
+  const canDownloadSignedPdf = hasSignedPdf;
 
   // Certificate rendering config
   const rawConfig = templateConfig || {};
@@ -358,10 +408,35 @@ export function ValidationPage() {
     } : {}),
   };
 
+  const downloadFileFromUrl = async (url: string, filename: string) => {
+    const response = await fetch(url);
+    if (!response.ok) throw new Error('No se pudo descargar el PDF firmado');
+    const blob = await response.blob();
+    const link = document.createElement('a');
+    const objectUrl = URL.createObjectURL(blob);
+    link.href = objectUrl;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(objectUrl);
+  };
+
   const handleDownloadPdf = async () => {
     setPdfLoading(true);
     try {
-      toast.loading('Generando PDF vectorial...', { id: 'validate-pdf' });
+      if (canDownloadSignedPdf && request?.certificate_url) {
+        toast.loading('Descargando PDF firmado...', { id: 'validate-pdf' });
+        await downloadFileFromUrl(request.certificate_url, `certificado-${requestCode || verificationCode}-firmado.pdf`);
+        toast.success('✅ PDF firmado descargado', { id: 'validate-pdf' });
+        return;
+      }
+
+      if (!request?.certificate_url) {
+        toast.error('No se encontró un PDF firmado. Generando una copia del certificado.', { id: 'validate-pdf' });
+      } else {
+        toast.loading('Generando PDF vectorial...', { id: 'validate-pdf' });
+      }
 
       const pdf = await renderTemplateToPdf(
         elements,
@@ -497,8 +572,7 @@ export function ValidationPage() {
     );
   };
 
-  const isApproved = request?.status === 'APPROVED' || request?.status === 'SIGNED';
-
+  
   return (
     <div className="min-h-screen bg-[#f8fafc] text-slate-800 selection:bg-emerald-500 selection:text-white antialiased">
       {/* Decorative grid background */}
@@ -593,9 +667,9 @@ export function ValidationPage() {
 
               {/* Status Card */}
               <div className={`bg-white rounded-3xl border shadow-xl shadow-slate-100 overflow-hidden relative ${
-                isApproved ? 'border-emerald-200/80' : 'border-slate-200'
+                isSignedOrHasPdf ? 'border-emerald-200/80' : 'border-slate-200'
               }`}>
-                <div className={`h-2 w-full ${isApproved ? 'bg-gradient-to-r from-emerald-500 to-teal-400' : 'bg-slate-400'}`} />
+                <div className={`h-2 w-full ${isSignedOrHasPdf ? 'bg-gradient-to-r from-emerald-500 to-teal-400' : 'bg-slate-400'}`} />
 
                 <div className="p-6">
                   <div className="flex items-start gap-4">
@@ -868,7 +942,7 @@ export function ValidationPage() {
 
                   <button
                     onClick={handleDownloadPdf}
-                    disabled={pdfLoading || !isApproved}
+                    disabled={pdfLoading || !isSignedOrHasPdf}
                     className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-6 py-3 bg-gradient-to-r from-emerald-600 to-teal-500 hover:from-emerald-700 hover:to-teal-600 text-white font-bold rounded-xl transition-all shadow-lg shadow-emerald-950/40 disabled:opacity-50 disabled:cursor-not-allowed hover:-translate-y-0.5 active:translate-y-0 text-sm"
                   >
                     {pdfLoading ? (
