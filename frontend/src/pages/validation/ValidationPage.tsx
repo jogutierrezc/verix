@@ -405,10 +405,8 @@ export function ValidationPage() {
     qr_content: validationUrl,
     'user.first_name': request?.user?.first_name || '',
     'user.last_name': request?.user?.last_name || '',
-    ...(request?.consecutive_number ? {
-      radicado: request.consecutive_number,
-      consecutivo: request.consecutive_number,
-    } : {}),
+    radicado: request?.consecutive_number || '',
+    consecutivo: request?.consecutive_number || '',
   };
 
   const downloadFileFromUrl = async (url: string, filename: string) => {
