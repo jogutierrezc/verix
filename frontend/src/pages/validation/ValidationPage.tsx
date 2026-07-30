@@ -835,7 +835,7 @@ export function ValidationPage() {
               </div>
 
               {/* Reviewer / Signature Info */}
-              {reviewerInfo && (
+              {reviewerInfo && request?.status !== 'REVOKED' && !reviewerInfo?.revoked && (
                 <div className="bg-white rounded-3xl border border-slate-200 shadow-xl shadow-slate-100 p-6 space-y-4">
                   <h3 className="text-xs font-black text-slate-400 uppercase tracking-widest flex items-center gap-2">
                     <Fingerprint size={14} className="text-emerald-600" /> Firma y Custodia
@@ -866,12 +866,28 @@ export function ValidationPage() {
                 </div>
               )}
 
-              {request.status === 'REVOKED' && request.revoke_reason && (
-                <div className="bg-amber-50 rounded-3xl p-6 border border-amber-200">
-                  <h3 className="text-xs font-black text-amber-700 uppercase tracking-wider mb-2 flex items-center gap-2">
-                    <AlertTriangle size={14} /> Motivo de Revocación
+              {request.status === 'REVOKED' && (
+                <div className="bg-amber-50 rounded-3xl p-6 border border-amber-200 shadow-lg shadow-amber-100/50">
+                  <h3 className="text-xs font-black text-amber-700 uppercase tracking-wider mb-3 flex items-center gap-2">
+                    <AlertTriangle size={16} /> Motivo de Revocación
                   </h3>
-                  <p className="text-sm text-amber-700">{request.revoke_reason}</p>
+                  <div className="bg-white/70 rounded-2xl p-4 border border-amber-100 mb-3">
+                    <p className="text-sm text-amber-800 leading-relaxed font-medium">
+                      {request.revoke_reason || 'No se especificó un motivo de revocación.'}
+                    </p>
+                  </div>
+                  {request.revoked_at && (
+                    <div className="flex items-center gap-2 text-xs text-amber-600">
+                      <Clock size={12} />
+                      <span>Revocado el {new Date(request.revoked_at).toLocaleDateString('es-CO', {
+                        day: 'numeric',
+                        month: 'long',
+                        year: 'numeric',
+                        hour: '2-digit',
+                        minute: '2-digit',
+                      })}</span>
+                    </div>
+                  )}
                 </div>
               )}
 

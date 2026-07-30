@@ -321,12 +321,20 @@ export const requestsApi = {
   },
 
   revoke: async (id: string, reason: string) => {
+    const revokedNotes = JSON.stringify({
+      revoked: true,
+      revoked_at: new Date().toISOString(),
+      revoke_reason: reason,
+      original_signature_removed: true,
+    });
+
     const { data, error } = await supabase
       .from('certificate_requests')
       .update({
         status: 'REVOKED',
         revoked_at: new Date().toISOString(),
         revoke_reason: reason,
+        reviewer_notes: revokedNotes,
       })
       .eq('id', id)
       .select()

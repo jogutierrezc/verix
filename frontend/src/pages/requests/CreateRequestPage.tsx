@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../hooks/useAuth';
 import { supabase } from '../../lib/supabase';
 import { ArrowLeft, Save, FileText, Upload, Table, AlertCircle, CheckCircle, Download } from 'lucide-react';
@@ -43,8 +43,15 @@ export function CreateRequestPage() {
   const { user } = useAuth();
   const navigate = useNavigate();
   const { id: editId } = useParams<{ id: string }>();
+  const [searchParams] = useSearchParams();
+  const reuseId = searchParams.get('reuse');
   const fileInputRef = useRef<HTMLInputElement>(null);
   const isEditMode = Boolean(editId);
+  const isReuseMode = Boolean(reuseId && !editId);
+
+  // ── State for reuse mode: show original rejection info ──
+  const [originalRejectedId, setOriginalRejectedId] = useState<string | null>(null);
+  const [originalRejectionReason, setOriginalRejectionReason] = useState<string | null>(null);
 
   // Step 1: choose single or multiple
   const [creationType, setCreationType] = useState<CreationType | null>(null);
@@ -75,6 +82,49 @@ export function CreateRequestPage() {
     if (!user) return;
     loadTemplates();
   }, [user]);
+
+  // ── Reuse mode: load rejected request data ──
+  useEffect(() => {
+    if (!reuseId || !user || editId) return;
+    loadRejectedData();
+  }, [reuseId, user, editId]);
+
+  const loadRejectedData = async () => {
+    try {
+      const { data, error } = await supabase
+        .from('certificate_requests')
+        .select('*, template:templates(name)')
+        .eq('id', reuseId)
+        .single();
+
+      if (error) throw error;
+      if (!data) { toast.error('Solicitud no encontrada'); navigate('/requests'); return; }
+
+      // Verify ownership
+      if (data.user_id !== user?.id) {
+        toast.error('No tienes permiso para reutilizar esta solicitud');
+        navigate('/requests');
+        return;
+      }
+
+      // Auto-select single mode
+      setCreationType('single');
+
+      // Pre-fill form data (but NOT template - user selects new one)
+      if (data.data && typeof data.data === 'object') {
+        setFormData(data.data as Record<string, string>);
+      }
+
+      setOriginalRejectedId(reuseId);
+      setOriginalRejectionReason(data.rejection_reason);
+
+      toast.success('Datos de solicitud rechazada cargados. Selecciona una plantilla y corrige los datos.');
+    } catch (err: any) {
+      console.error('Error loading rejected request:', err);
+      toast.error('Error al cargar los datos de la solicitud');
+      navigate('/requests');
+    }
+  };
 
   // ── Edit mode: load existing request ──
   useEffect(() => {
@@ -164,8 +214,8 @@ export function CreateRequestPage() {
 
     setSelectedTemplate(templateId);
 
-    // Only reset form if not in edit mode or if template changed
-    if (!isEditMode || templateId !== selectedTemplate) {
+    // Only reset form if not in edit/reuse mode or if template changed
+    if ((!isEditMode && !isReuseMode) || templateId !== selectedTemplate) {
       setFormData({});
     }
     setExcelData([]);
@@ -181,8 +231,8 @@ export function CreateRequestPage() {
       const visible = vars.filter((v: string) => !SYSTEM_VARS.has(v));
       setFilteredVars(visible);
 
-      // In edit mode, don't reset formData — it's already loaded
-      if (!isEditMode) {
+      // In edit/reuse mode, don't reset formData — it's already loaded
+      if (!isEditMode && !isReuseMode) {
         const initial: Record<string, string> = {};
         visible.forEach((v: string) => { initial[v] = ''; });
         setFormData(initial);
@@ -567,10 +617,10 @@ export function CreateRequestPage() {
         </button>
         <div>
           <h1 className="text-headline-lg font-headline-lg text-on-surface">
-            {isEditMode ? 'Editar solicitud' : 'Nueva solicitud'}
+            {isEditMode ? 'Editar solicitud' : isReuseMode ? 'Reutilizar datos' : 'Nueva solicitud'}
           </h1>
           <p className="text-body-md text-on-surface-variant">
-            {isEditMode ? 'Modifica los datos de la solicitud' : 'Solicita la emisión de certificados'}
+            {isEditMode ? 'Modifica los datos de la solicitud' : isReuseMode ? 'Corrige los datos y selecciona una plantilla para crear una nueva solicitud' : 'Solicita la emisión de certificados'}
           </p>
         </div>
       </div>
@@ -671,6 +721,44 @@ export function CreateRequestPage() {
               </div>
             )}
           </div>
+
+          {/* Reuse mode banner */}
+          {isReuseMode && originalRejectedId && (
+            <div className="bg-amber-50 rounded-2xl p-5 border border-amber-200/70">
+              <div className="flex items-start gap-3">
+                <AlertCircle size={20} className="text-amber-600 shrink-0 mt-0.5" />
+                <div className="flex-1">
+                  <h3 className="text-sm font-bold text-amber-800 mb-1">Reutilizando datos de solicitud rechazada</h3>
+                  <p className="text-xs text-amber-700/80">
+                    Los datos de la solicitud anterior se han cargado. Puedes seleccionar una plantilla diferente,
+                    corregir los datos y crear una nueva solicitud.
+                  </p>
+                  {originalRejectionReason && (
+                    <div className="mt-2 bg-white/70 rounded-xl p-3 border border-amber-100">
+                      <span className="text-[10px] uppercase tracking-wider text-rose-600/70 font-bold block">Motivo del rechazo anterior</span>
+                      <p className="text-sm font-medium text-rose-700 mt-0.5">{originalRejectionReason}</p>
+                    </div>
+                  )}
+                  {/* Show original data */}
+                  {Object.keys(formData).length > 0 && (
+                    <details className="mt-3 group">
+                      <summary className="text-xs font-semibold text-amber-700 cursor-pointer hover:text-amber-800 transition-colors select-none">
+                        Ver datos originales ({Object.keys(formData).length} campos)
+                      </summary>
+                      <div className="mt-2 bg-white/60 rounded-xl p-3 border border-amber-100/80 grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
+                        {Object.entries(formData).map(([key, value]) => (
+                          <div key={key}>
+                            <span className="text-[10px] uppercase tracking-wider text-amber-600/60 font-bold block">{key.replace(/_/g, ' ')}</span>
+                            <span className="font-medium text-amber-900">{value || '—'}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </details>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* === SINGLE MODE === */}
           {creationType === 'single' && (

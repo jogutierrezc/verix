@@ -3,7 +3,7 @@ import { useAuth } from '../../hooks/useAuth';
 import { Link, useNavigate } from 'react-router-dom';
 import { supabase } from '../../lib/supabase';
 import { auditApi, getClientIP } from '../../services/api';
-import { Plus, Search, MoreHorizontal, CheckCircle, XCircle, X, Eye, Download, ChevronDown, ChevronRight, Package, FileText, Loader2, Edit, Trash2, AlertTriangle, AlertCircle, Upload, Table } from 'lucide-react';
+import { Plus, Search, MoreHorizontal, CheckCircle, XCircle, X, Eye, Download, ChevronDown, ChevronRight, Package, FileText, Loader2, Edit, Trash2, AlertTriangle, AlertCircle, Upload, Table, RefreshCw, Database } from 'lucide-react';
 import { format } from 'date-fns';
 import toast from 'react-hot-toast';
 import JSZip from 'jszip';
@@ -37,6 +37,7 @@ export function RequestsPage() {
   const [revokeSelectedId, setRevokeSelectedId] = useState<string | null>(null);
   const [revokeReason, setRevokeReason] = useState('');
   const [previewRequestId, setPreviewRequestId] = useState<string | null>(null);
+  const [showRejectedDataId, setShowRejectedDataId] = useState<string | null>(null);
   const [batchSigning, setBatchSigning] = useState(false);
   const [signingBatchId, setSigningBatchId] = useState<string | null>(null);
   const [showBatchModal, setShowBatchModal] = useState(false);
@@ -450,6 +451,15 @@ export function RequestsPage() {
   const handleRevoke = async (id: string) => {
     if (!revokeReason.trim()) { toast.error('Debes indicar un motivo de revocación'); return; }
     try {
+      // Update reviewer_notes to mark the signature as revoked (disables it in validation)
+      const revokedNotes = JSON.stringify({
+        revoked: true,
+        revoked_at: new Date().toISOString(),
+        revoke_reason: revokeReason,
+        revoked_by: user?.id,
+        original_signature_removed: true,
+      });
+
       const { error } = await supabase
         .from('certificate_requests')
         .update({
@@ -458,9 +468,26 @@ export function RequestsPage() {
           reviewed_at: new Date().toISOString(),
           revoked_at: new Date().toISOString(),
           revoke_reason: revokeReason,
+          reviewer_notes: revokedNotes,
         })
         .eq('id', id);
       if (error) throw error;
+
+      // ── Audit log: firma revocada ──
+      try {
+        const ip = await getClientIP();
+        await auditApi.log({
+          user_id: user?.id,
+          user_email: user?.email,
+          module: 'signatures',
+          action: 'revoke',
+          entity_id: id,
+          entity_type: 'certificate_request',
+          ip_address: ip,
+          description: `Firma revocada - Motivo: ${revokeReason} - Solicitud: ${id}`,
+        });
+      } catch { /* silent */ }
+
       toast.success('Firma revocada correctamente');
       setRevokeSelectedId(null);
       setRevokeReason('');
@@ -1031,13 +1058,28 @@ export function RequestsPage() {
             } : {}),
           };
 
+          // Extract signature from reviewer_notes (for approved/signed certificates)
+          let selectedSignature: { signature_image_url?: string } | null = null;
+          if (req.reviewer_notes && ['APPROVED', 'SIGNED'].includes(req.status)) {
+            try {
+              const parsed = typeof req.reviewer_notes === 'string'
+                ? JSON.parse(req.reviewer_notes)
+                : req.reviewer_notes;
+              if (parsed?.signature_url) {
+                selectedSignature = { signature_image_url: parsed.signature_url };
+              }
+            } catch {
+              // Not valid JSON
+            }
+          }
+
           const pdf = await renderTemplateToPdf(
             elements,
             pageOrientation,
             pageWidth,
             pageHeight,
             requestData,
-            null, // no signature for pending certificates
+            selectedSignature,
           );
 
           const pdfBlob = pdf.output('blob');
@@ -1283,6 +1325,24 @@ export function RequestsPage() {
                           >
                             <Edit size={18} />
                           </Link>
+                          {req.status === 'REJECTED' && (
+                            <>
+                              <button
+                                onClick={(e) => { e.stopPropagation(); setShowRejectedDataId(showRejectedDataId === req.id ? null : req.id); }}
+                                className="p-2 hover:bg-sky-100 rounded-full text-sky-600 transition-colors"
+                                title="Ver datos de la solicitud"
+                              >
+                                <Eye size={18} />
+                              </button>
+                              <Link
+                                to={`/requests/new?reuse=${encodeURIComponent(req.id)}`}
+                                className="p-2 hover:bg-primary/10 rounded-full text-primary transition-colors"
+                                title="Reutilizar datos para nueva solicitud (con otra plantilla)"
+                              >
+                                <RefreshCw size={18} />
+                              </Link>
+                            </>
+                          )}
                           <button
                             onClick={(e) => { e.stopPropagation(); setDeleteConfirmId(deleteConfirmId === req.id ? null : req.id); }}
                             className="p-2 hover:bg-error/10 rounded-full text-error transition-colors"
@@ -1295,45 +1355,47 @@ export function RequestsPage() {
                     </div>
                   </div>
 
-                  {/* Reject modal */}
-                  {selected === req.id && (
-                    <div className="absolute mt-2 right-0 top-full z-10 bg-white rounded-2xl shadow-xl border border-outline-variant/30 p-5 w-72 animate-scale-in">
-                      <p className="text-sm font-bold text-on-surface mb-2">Motivo de rechazo</p>
-                      <textarea className="input mb-3" rows={3} value={rejectReason}
-                        onChange={e => setRejectReason(e.target.value)} placeholder="Indica el motivo..." />
-                      <div className="flex gap-2">
-                        <button onClick={() => handleReject(req.id)} className="btn-danger btn-sm flex-1">Rechazar</button>
-                        <button onClick={() => { setSelected(null); setRejectReason(''); }} className="btn-secondary btn-sm">Cancelar</button>
-                      </div>
-                    </div>
-                  )}
+                  {/* (Reject modal moved to centralized popup below) */}
 
-                  {/* Delete confirmation */}
-                  {deleteConfirmId === req.id && (
-                    <div className="absolute inset-0 bg-white/95 backdrop-blur-sm rounded-2xl z-10 flex items-center justify-center p-6 animate-fade-in">
-                      <div className="text-center max-w-xs">
-                        <div className="w-12 h-12 rounded-2xl bg-error-container flex items-center justify-center mx-auto mb-3">
-                          <AlertTriangle size={24} className="text-error" />
+                  {/* (Delete confirmation moved to centralized popup below) */}
+
+                  {/* (Revoke modal moved to centralized popup below) */}
+
+                  {/* Rejected request data preview */}
+                  {showRejectedDataId === req.id && req.data && Object.keys(req.data).length > 0 && (
+                    <div className="bg-sky-50/70 rounded-2xl p-5 border border-sky-200/60 mt-2 animate-fade-in">
+                      <div className="flex items-center justify-between mb-3">
+                        <h4 className="text-xs font-black text-sky-700 uppercase tracking-wider flex items-center gap-2">
+                          <Database size={14} /> Datos de la solicitud
+                        </h4>
+                        <button
+                          onClick={() => setShowRejectedDataId(null)}
+                          className="p-1 hover:bg-sky-100 rounded-lg text-sky-500 transition-colors"
+                        >
+                          <X size={14} />
+                        </button>
+                      </div>
+                      <div className="grid grid-cols-2 md:grid-cols-3 gap-x-4 gap-y-2.5 text-sm">
+                        {Object.entries(req.data).map(([key, value]) => (
+                          <div key={key}>
+                            <span className="text-[10px] uppercase tracking-wider text-sky-600/70 font-bold block">{key.replace(/_/g, ' ')}</span>
+                            <p className="font-semibold text-sky-900 mt-0.5 break-words">{String(value)}</p>
+                          </div>
+                        ))}
+                      </div>
+                      {req.rejection_reason && (
+                        <div className="mt-3 pt-3 border-t border-sky-200/60">
+                          <span className="text-[10px] uppercase tracking-wider text-rose-600/70 font-bold block">Motivo de rechazo</span>
+                          <p className="text-sm font-medium text-rose-700 mt-0.5">{req.rejection_reason}</p>
                         </div>
-                        <p className="text-sm font-bold text-on-surface mb-1">¿Eliminar solicitud?</p>
-                        <p className="text-xs text-on-surface-variant/70 mb-4">
-                          Esta acción no se puede deshacer. Se eliminará la solicitud <strong className="text-on-surface">{req.code}</strong>.
-                        </p>
-                        <div className="flex gap-2 justify-center">
-                          <button
-                            onClick={() => handleDeleteRequest(req.id)}
-                            disabled={deleting}
-                            className="btn-danger btn-sm px-4"
-                          >
-                            {deleting ? 'Eliminando...' : 'Eliminar'}
-                          </button>
-                          <button
-                            onClick={() => setDeleteConfirmId(null)}
-                            className="btn-secondary btn-sm px-4"
-                          >
-                            Cancelar
-                          </button>
-                        </div>
+                      )}
+                      <div className="mt-3 pt-3 border-t border-sky-200/60 flex items-center justify-end gap-2">
+                        <Link
+                          to={`/requests/new?reuse=${encodeURIComponent(req.id)}`}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-primary text-white text-xs font-bold rounded-lg hover:bg-primary/90 transition-colors"
+                        >
+                          <RefreshCw size={14} /> Crear nueva con estos datos
+                        </Link>
                       </div>
                     </div>
                   )}
@@ -1608,61 +1670,8 @@ export function RequestsPage() {
                               </div>
                             </div>
 
-                            {/* Reject modal for batch item */}
-                            {selected === req.id && (
-                              <div className="absolute mt-2 right-0 top-full z-10 bg-white rounded-2xl shadow-xl border border-outline-variant/30 p-5 w-72 animate-scale-in">
-                                <p className="text-sm font-bold text-on-surface mb-2">Motivo de rechazo</p>
-                                <textarea className="input mb-3" rows={3} value={rejectReason}
-                                  onChange={e => setRejectReason(e.target.value)} placeholder="Indica el motivo..." />
-                                <div className="flex gap-2">
-                                  <button onClick={() => handleReject(req.id)} className="btn-danger btn-sm flex-1">Rechazar</button>
-                                  <button onClick={() => { setSelected(null); setRejectReason(''); }} className="btn-secondary btn-sm">Cancelar</button>
-                                </div>
-                              </div>
-                            )}
-
-                            {/* Revoke modal for batch item */}
-                            {revokeSelectedId === req.id && (
-                              <div className="absolute mt-2 right-0 top-full z-10 bg-white rounded-2xl shadow-xl border border-outline-variant/30 p-5 w-72 animate-scale-in">
-                                <p className="text-sm font-bold text-on-surface mb-2">Motivo de revocación</p>
-                                <textarea className="input mb-3" rows={3} value={revokeReason}
-                                  onChange={e => setRevokeReason(e.target.value)} placeholder="Indica el motivo para revocar la firma..." />
-                                <div className="flex gap-2">
-                                  <button onClick={() => handleRevoke(req.id)} className="btn-danger btn-sm flex-1">Revocar</button>
-                                  <button onClick={() => { setRevokeSelectedId(null); setRevokeReason(''); }} className="btn-secondary btn-sm">Cancelar</button>
-                                </div>
-                              </div>
-                            )}
-
-                            {/* Delete confirmation for batch item */}
-                            {deleteConfirmId === req.id && (
-                              <div className="absolute inset-0 z-10 flex items-center justify-center px-5 animate-fade-in">
-                                <div className="flex items-center gap-3 bg-white rounded-xl shadow-lg border border-error/20 px-4 py-2.5">
-                                  <div className="w-8 h-8 rounded-lg bg-error-container flex items-center justify-center shrink-0">
-                                    <AlertTriangle size={16} className="text-error" />
-                                  </div>
-                                  <div className="text-xs">
-                                    <p className="font-bold text-on-surface">¿Eliminar {req.code}?</p>
-                                    <p className="text-on-surface-variant/60 text-[10px]">Esta acción no se puede deshacer</p>
-                                  </div>
-                                  <div className="flex gap-1.5 shrink-0">
-                                    <button
-                                      onClick={(e) => { e.stopPropagation(); handleDeleteRequest(req.id); }}
-                                      disabled={deleting}
-                                      className="btn-danger btn-xs px-2.5 py-1 text-[10px]"
-                                    >
-                                      {deleting ? '...' : 'Eliminar'}
-                                    </button>
-                                    <button
-                                      onClick={(e) => { e.stopPropagation(); setDeleteConfirmId(null); }}
-                                      className="btn-secondary btn-xs px-2.5 py-1 text-[10px]"
-                                    >
-                                      Cancelar
-                                    </button>
-                                  </div>
-                                </div>
-                              </div>
-                            )}
+                            {/* (Reject modal moved to centralized popup below) */}
+                            {/* (Delete confirmation moved to centralized popup below) */}
                           </div>
                         );
                       })
@@ -2029,6 +2038,201 @@ export function RequestsPage() {
           </div>
         </div>
       )}
+
+      {/* ── Centralized Reject Modal (popup emergente) ── */}
+      {selected && (() => {
+        const rejectReq = filtered.find(r => r.id === selected);
+        if (!rejectReq) return null;
+        return (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4 animate-fade-in"
+            onClick={() => { setSelected(null); setRejectReason(''); }}
+          >
+            <div
+              className="bg-white rounded-3xl shadow-2xl w-full max-w-md overflow-hidden animate-scale-in"
+              onClick={e => e.stopPropagation()}
+            >
+              {/* Header */}
+              <div className="px-6 py-5 border-b border-slate-100 flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-rose-50 border border-rose-200 flex items-center justify-center shrink-0">
+                  <XCircle size={20} className="text-rose-600" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-slate-900">Rechazar solicitud</h3>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    {rejectReq.code} — {getStudentName(rejectReq)}
+                  </p>
+                </div>
+              </div>
+
+              {/* Content */}
+              <div className="px-6 py-5">
+                <label className="block text-sm font-bold text-slate-700 mb-2">
+                  Motivo de rechazo
+                </label>
+                <textarea
+                  className="input w-full resize-none"
+                  rows={4}
+                  value={rejectReason}
+                  onChange={e => setRejectReason(e.target.value)}
+                  placeholder="Indica el motivo del rechazo..."
+                  autoFocus
+                />
+              </div>
+
+              {/* Footer */}
+              <div className="px-6 py-4 bg-slate-50/70 border-t border-slate-100 flex items-center justify-end gap-3">
+                <button
+                  onClick={() => { setSelected(null); setRejectReason(''); }}
+                  className="btn-secondary px-5 py-2.5 text-sm"
+                >
+                  Cancelar
+                </button>
+                <button
+                  onClick={() => handleReject(selected)}
+                  disabled={!rejectReason.trim()}
+                  className="btn-danger px-5 py-2.5 text-sm"
+                >
+                  Rechazar solicitud
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ── Centralized Delete Confirmation (popup emergente) ── */}
+      {deleteConfirmId && (() => {
+        const delReq = filtered.find(r => r.id === deleteConfirmId);
+        if (!delReq) return null;
+        return (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4 animate-fade-in"
+            onClick={() => setDeleteConfirmId(null)}
+          >
+            <div
+              className="bg-white rounded-3xl shadow-2xl w-full max-w-md overflow-hidden animate-scale-in"
+              onClick={e => e.stopPropagation()}
+            >
+              {/* Header */}
+              <div className="px-6 py-5 border-b border-slate-100 flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-rose-50 border border-rose-200 flex items-center justify-center shrink-0">
+                  <AlertTriangle size={20} className="text-rose-600" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-slate-900">Eliminar solicitud</h3>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    {delReq.code} — {getStudentName(delReq)}
+                  </p>
+                </div>
+              </div>
+
+              {/* Content */}
+              <div className="px-6 py-5">
+                <div className="bg-rose-50/70 rounded-xl p-4 border border-rose-100">
+                  <p className="text-sm text-rose-700/80 leading-relaxed">
+                    ¿Estás seguro de eliminar la solicitud <strong>{delReq.code}</strong>?
+                  </p>
+                  <p className="text-xs text-rose-500/70 mt-2">
+                    Esta acción no se puede deshacer. Se eliminará permanentemente la solicitud y todos sus datos asociados.
+                  </p>
+                </div>
+              </div>
+
+              {/* Footer */}
+              <div className="px-6 py-4 bg-slate-50/70 border-t border-slate-100 flex items-center justify-end gap-3">
+                <button
+                  onClick={() => setDeleteConfirmId(null)}
+                  className="btn-secondary px-5 py-2.5 text-sm"
+                >
+                  Cancelar
+                </button>
+                <button
+                  onClick={() => handleDeleteRequest(deleteConfirmId)}
+                  disabled={deleting}
+                  className="btn-danger px-5 py-2.5 text-sm"
+                >
+                  {deleting ? 'Eliminando...' : 'Eliminar solicitud'}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ── Centralized Revoke Modal (popup emergente) ── */}
+      {revokeSelectedId && (() => {
+        const revokeReq = filtered.find(r => r.id === revokeSelectedId);
+        if (!revokeReq) return null;
+        return (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4 animate-fade-in"
+            onClick={() => { setRevokeSelectedId(null); setRevokeReason(''); }}
+          >
+            <div
+              className="bg-white rounded-3xl shadow-2xl w-full max-w-md overflow-hidden animate-scale-in"
+              onClick={e => e.stopPropagation()}
+            >
+              {/* Header */}
+              <div className="px-6 py-5 border-b border-slate-100 flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-amber-50 border border-amber-200 flex items-center justify-center shrink-0">
+                  <AlertTriangle size={20} className="text-amber-600" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-slate-900">Revocar firma</h3>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    {revokeReq.code} — {getStudentName(revokeReq)}
+                  </p>
+                </div>
+              </div>
+
+              {/* Content */}
+              <div className="px-6 py-5 space-y-4">
+                <div className="bg-amber-50/70 rounded-xl p-4 border border-amber-100">
+                  <p className="text-xs text-amber-700/80 leading-relaxed">
+                    Al revocar la firma, el certificado quedará marcado como <strong>revocado</strong> en el portal de validación y la firma dejará de mostrarse.
+                    Esta acción no se puede deshacer.
+                  </p>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-bold text-slate-700 mb-2">
+                    Motivo de revocación
+                  </label>
+                  <textarea
+                    className="input w-full resize-none"
+                    rows={4}
+                    value={revokeReason}
+                    onChange={e => setRevokeReason(e.target.value)}
+                    placeholder="Indica el motivo para revocar la firma..."
+                    autoFocus
+                  />
+                </div>
+              </div>
+
+              {/* Footer */}
+              <div className="px-6 py-4 bg-slate-50/70 border-t border-slate-100 flex items-center justify-end gap-3">
+                <button
+                  onClick={() => { setRevokeSelectedId(null); setRevokeReason(''); }}
+                  className="btn-secondary px-5 py-2.5 text-sm"
+                >
+                  Cancelar
+                </button>
+                <button
+                  onClick={() => {
+                    const id = revokeSelectedId;
+                    if (id) handleRevoke(id);
+                  }}
+                  disabled={!revokeReason.trim()}
+                  className="btn-danger px-5 py-2.5 text-sm"
+                >
+                  Revocar firma
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }
