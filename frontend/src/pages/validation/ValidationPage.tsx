@@ -370,9 +370,11 @@ export function ValidationPage() {
   }
 
   // Derived selected signature for PDF generation (matches renderTemplateToPdf interface)
-  const selectedSignature = (reviewerInfo?.signature_url || reviewerSignatureUrl)
-    ? { signature_image_url: reviewerInfo?.signature_url || reviewerSignatureUrl }
-    : null;
+  const selectedSignature = request?.status === 'REVOKED'
+    ? null
+    : (reviewerInfo?.signature_url || reviewerSignatureUrl)
+      ? { signature_image_url: reviewerInfo?.signature_url || reviewerSignatureUrl }
+      : null;
 
   const signedPdfUrl = request?.certificate_url || null;
   const hasSignedPdf = Boolean(signedPdfUrl);
@@ -529,8 +531,10 @@ export function ValidationPage() {
                 draggable={false}
               />
             ) : (
-              <span className="text-slate-400 italic text-[10px] select-none">
-                {reviewerInfo?.signature_name || filledContent || '[Firma]'}
+              <span className={`italic text-[10px] select-none ${request?.status === 'REVOKED' ? 'text-amber-700' : 'text-slate-400'}`}>
+                {request?.status === 'REVOKED'
+                  ? 'Firma revocada'
+                  : reviewerInfo?.signature_name || filledContent || '[Firma]'}
               </span>
             )}
           </div>
@@ -859,6 +863,15 @@ export function ValidationPage() {
                     <XCircle size={14} /> Motivo de Rechazo
                   </h3>
                   <p className="text-sm text-rose-600">{request.rejection_reason}</p>
+                </div>
+              )}
+
+              {request.status === 'REVOKED' && request.revoke_reason && (
+                <div className="bg-amber-50 rounded-3xl p-6 border border-amber-200">
+                  <h3 className="text-xs font-black text-amber-700 uppercase tracking-wider mb-2 flex items-center gap-2">
+                    <AlertTriangle size={14} /> Motivo de Revocación
+                  </h3>
+                  <p className="text-sm text-amber-700">{request.revoke_reason}</p>
                 </div>
               )}
 

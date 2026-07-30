@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { supabase, STORAGE } from '../../lib/supabase';
 import { auditApi, getClientIP } from '../../services/api';
 import { X, CheckCircle, XCircle, Download, FileText, Loader2, Signature, Printer } from 'lucide-react';
@@ -1087,7 +1088,7 @@ export function CertificatePreview({
   };
 
   // ── Render ──
-  return (
+  return createPortal(
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4 animate-fade-in">
       <div className="bg-white rounded-3xl shadow-2xl w-full max-w-[1200px] max-h-[95vh] flex flex-col overflow-hidden">
         {/* Header */}
@@ -1387,6 +1388,7 @@ export function CertificatePreview({
           )}
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

@@ -34,6 +34,8 @@ export function RequestsPage() {
   const [statusFilter, setStatusFilter] = useState<string>('');
   const [selected, setSelected] = useState<string | null>(null);
   const [rejectReason, setRejectReason] = useState('');
+  const [revokeSelectedId, setRevokeSelectedId] = useState<string | null>(null);
+  const [revokeReason, setRevokeReason] = useState('');
   const [previewRequestId, setPreviewRequestId] = useState<string | null>(null);
   const [batchSigning, setBatchSigning] = useState(false);
   const [signingBatchId, setSigningBatchId] = useState<string | null>(null);
@@ -134,7 +136,7 @@ export function RequestsPage() {
 
       // Role-based filters
       if (user?.role === 'APPLICANT') query = query.eq('user_id', user.id);
-      if (user?.role === 'SIGNER') query = query.in('status', ['PENDING', 'IN_REVIEW', 'APPROVED']);
+      if (user?.role === 'SIGNER') query = query.in('status', ['PENDING', 'IN_REVIEW', 'APPROVED', 'REJECTED', 'SIGNED', 'REVOKED']);
 
       // Status filter
       if (statusFilter) query = query.eq('status', statusFilter);
@@ -442,6 +444,70 @@ export function RequestsPage() {
       loadRequests();
     } catch (err: any) {
       toast.error(err.message);
+    }
+  };
+
+  const handleRevoke = async (id: string) => {
+    if (!revokeReason.trim()) { toast.error('Debes indicar un motivo de revocación'); return; }
+    try {
+      const { error } = await supabase
+        .from('certificate_requests')
+        .update({
+          status: 'REVOKED',
+          reviewed_by: user?.id,
+          reviewed_at: new Date().toISOString(),
+          revoked_at: new Date().toISOString(),
+          revoke_reason: revokeReason,
+        })
+        .eq('id', id);
+      if (error) throw error;
+      toast.success('Firma revocada correctamente');
+      setRevokeSelectedId(null);
+      setRevokeReason('');
+      loadRequests();
+    } catch (err: any) {
+      toast.error(err.message || 'Error al revocar la firma');
+      console.error('❌ Revoke request error:', err);
+    }
+  };
+
+  const handleApproveSingle = async (id: string) => {
+    setBatchSigning(true);
+    try {
+      const selectedSig = batchSignatures.find((sig: any) => sig.id === batchSelectedSignatureId)
+        || batchSignatures.find((sig: any) => sig.is_primary)
+        || batchSignatures[0]
+        || null;
+
+      const updateData: any = {
+        status: 'APPROVED',
+        reviewed_by: user?.id,
+        reviewed_at: new Date().toISOString(),
+      };
+
+      if (selectedSig) {
+        updateData.reviewer_notes = JSON.stringify({
+          signature_id: selectedSig.id,
+          signature_name: selectedSig.full_name,
+          signature_title: selectedSig.title,
+          signature_url: selectedSig.signature_image_url,
+        });
+      }
+
+      const { error } = await supabase
+        .from('certificate_requests')
+        .update(updateData)
+        .eq('id', id)
+        .in('status', ['PENDING', 'IN_REVIEW']);
+      if (error) throw error;
+
+      toast.success('Solicitud aprobada');
+      loadRequests();
+    } catch (err: any) {
+      toast.error(err.message || 'Error al aprobar la solicitud');
+      console.error('❌ Approve single request error:', err);
+    } finally {
+      setBatchSigning(false);
     }
   };
 
@@ -1169,6 +1235,10 @@ export function RequestsPage() {
                             className="p-2 hover:bg-primary/10 rounded-full text-primary transition-colors" title="Vista previa">
                             <Eye size={18} />
                           </button>
+                          <button onClick={() => handleApproveSingle(req.id)}
+                            className="p-2 hover:bg-primary/10 rounded-full text-primary transition-colors" title="Aprobar solicitud">
+                            <CheckCircle size={18} />
+                          </button>
                           <button onClick={() => setSelected(selected === req.id ? null : req.id)}
                             className="p-2 hover:bg-error/10 rounded-full text-error transition-colors" title="Rechazar">
                             <XCircle size={18} />
@@ -1192,6 +1262,15 @@ export function RequestsPage() {
                           >
                             <Download size={18} />
                           </button>
+                          {(user?.role === 'SIGNER' || user?.role === 'ADMIN') && (
+                            <button
+                              onClick={() => { setSelected(null); setRevokeReason(''); setRevokeSelectedId(req.id); }}
+                              className="p-2 hover:bg-amber-100 rounded-full text-amber-700 transition-colors"
+                              title="Revocar firma"
+                            >
+                              <AlertTriangle size={18} />
+                            </button>
+                          )}
                         </>
                       )}
                       {/* Applicant edit/delete actions */}
@@ -1451,49 +1530,109 @@ export function RequestsPage() {
                                     {status.label}
                                   </span>
                                   <div className="flex items-center gap-1">
+                                    {['PENDING', 'IN_REVIEW'].includes(req.status) && (user?.role === 'SIGNER' || user?.role === 'ADMIN') && (
+                                      <>
+                                        <button
+                                          onClick={(e) => { e.stopPropagation(); setPreviewRequestId(req.id); }}
+                                          className="p-1.5 hover:bg-primary/10 rounded-full text-primary transition-colors"
+                                          title="Vista previa"
+                                        >
+                                          <Eye size={15} />
+                                        </button>
+                                        <button
+                                          onClick={(e) => { e.stopPropagation(); handleApproveSingle(req.id); }}
+                                          className="p-1.5 hover:bg-primary/10 rounded-full text-primary transition-colors"
+                                          title="Aprobar solicitud"
+                                        >
+                                          <CheckCircle size={15} />
+                                        </button>
+                                        <button
+                                          onClick={(e) => { e.stopPropagation(); setSelected(selected === req.id ? null : req.id); }}
+                                          className="p-1.5 hover:bg-error/10 rounded-full text-error transition-colors"
+                                          title="Rechazar solicitud"
+                                        >
+                                          <XCircle size={15} />
+                                        </button>
+                                      </>
+                                    )}
                                     {(req.status === 'APPROVED' || req.status === 'SIGNED') && (
-                                    <>
-                                      <button
-                                        onClick={(e) => { e.stopPropagation(); setPreviewRequestId(req.id); }}
-                                        className="p-1.5 hover:bg-primary/10 rounded-full text-primary transition-colors"
-                                        title="Ver certificado"
-                                      >
-                                        <Eye size={15} />
-                                      </button>
-                                      <button
-                                        onClick={(e) => { e.stopPropagation(); downloadSignedPdf(req); }}
-                                        disabled={downloading}
-                                        className="p-1.5 hover:bg-primary/10 rounded-full text-primary transition-colors"
-                                        title="Descargar PDF con Firma Electrónica"
-                                      >
-                                        <Download size={15} />
-                                      </button>
-                                    </>
-                                  )}
-                                  {/* Applicant: edit individual batch item */}
-                                  {user?.role === 'APPLICANT' && EDITABLE_STATUSES.includes(req.status) && (
-                                    <>
-                                      <Link
-                                        to={`/requests/edit/${req.id}`}
-                                        onClick={(e) => e.stopPropagation()}
-                                        className="p-1.5 hover:bg-primary/10 rounded-full text-primary transition-colors"
-                                        title={`Editar ${req.code}`}
-                                      >
-                                        <Edit size={15} />
-                                      </Link>
-                                      <button
-                                        onClick={(e) => { e.stopPropagation(); setDeleteConfirmId(deleteConfirmId === req.id ? null : req.id); }}
-                                        className="p-1.5 hover:bg-error/10 rounded-full text-error transition-colors"
-                                        title={`Eliminar ${req.code}`}
-                                      >
-                                        <Trash2 size={15} />
-                                      </button>
-                                    </>
-                                  )}
+                                      <>
+                                        <button
+                                          onClick={(e) => { e.stopPropagation(); setPreviewRequestId(req.id); }}
+                                          className="p-1.5 hover:bg-primary/10 rounded-full text-primary transition-colors"
+                                          title="Ver certificado"
+                                        >
+                                          <Eye size={15} />
+                                        </button>
+                                        <button
+                                          onClick={(e) => { e.stopPropagation(); downloadSignedPdf(req); }}
+                                          disabled={downloading}
+                                          className="p-1.5 hover:bg-primary/10 rounded-full text-primary transition-colors"
+                                          title="Descargar PDF con Firma Electrónica"
+                                        >
+                                          <Download size={15} />
+                                        </button>
+                                        {(user?.role === 'SIGNER' || user?.role === 'ADMIN') && (
+                                          <button
+                                            onClick={(e) => { e.stopPropagation(); setSelected(null); setRevokeReason(''); setRevokeSelectedId(req.id); }}
+                                            className="p-1.5 hover:bg-amber-100 rounded-full text-amber-700 transition-colors"
+                                            title="Revocar firma"
+                                          >
+                                            <AlertTriangle size={15} />
+                                          </button>
+                                        )}
+                                      </>
+                                    )}
+                                    {/* Applicant: edit individual batch item */}
+                                    {user?.role === 'APPLICANT' && EDITABLE_STATUSES.includes(req.status) && (
+                                      <>
+                                        <Link
+                                          to={`/requests/edit/${req.id}`}
+                                          onClick={(e) => e.stopPropagation()}
+                                          className="p-1.5 hover:bg-primary/10 rounded-full text-primary transition-colors"
+                                          title={`Editar ${req.code}`}
+                                        >
+                                          <Edit size={15} />
+                                        </Link>
+                                        <button
+                                          onClick={(e) => { e.stopPropagation(); setDeleteConfirmId(deleteConfirmId === req.id ? null : req.id); }}
+                                          className="p-1.5 hover:bg-error/10 rounded-full text-error transition-colors"
+                                          title={`Eliminar ${req.code}`}
+                                        >
+                                          <Trash2 size={15} />
+                                        </button>
+                                      </>
+                                    )}
                                   </div>
                                 </div>
                               </div>
                             </div>
+
+                            {/* Reject modal for batch item */}
+                            {selected === req.id && (
+                              <div className="absolute mt-2 right-0 top-full z-10 bg-white rounded-2xl shadow-xl border border-outline-variant/30 p-5 w-72 animate-scale-in">
+                                <p className="text-sm font-bold text-on-surface mb-2">Motivo de rechazo</p>
+                                <textarea className="input mb-3" rows={3} value={rejectReason}
+                                  onChange={e => setRejectReason(e.target.value)} placeholder="Indica el motivo..." />
+                                <div className="flex gap-2">
+                                  <button onClick={() => handleReject(req.id)} className="btn-danger btn-sm flex-1">Rechazar</button>
+                                  <button onClick={() => { setSelected(null); setRejectReason(''); }} className="btn-secondary btn-sm">Cancelar</button>
+                                </div>
+                              </div>
+                            )}
+
+                            {/* Revoke modal for batch item */}
+                            {revokeSelectedId === req.id && (
+                              <div className="absolute mt-2 right-0 top-full z-10 bg-white rounded-2xl shadow-xl border border-outline-variant/30 p-5 w-72 animate-scale-in">
+                                <p className="text-sm font-bold text-on-surface mb-2">Motivo de revocación</p>
+                                <textarea className="input mb-3" rows={3} value={revokeReason}
+                                  onChange={e => setRevokeReason(e.target.value)} placeholder="Indica el motivo para revocar la firma..." />
+                                <div className="flex gap-2">
+                                  <button onClick={() => handleRevoke(req.id)} className="btn-danger btn-sm flex-1">Revocar</button>
+                                  <button onClick={() => { setRevokeSelectedId(null); setRevokeReason(''); }} className="btn-secondary btn-sm">Cancelar</button>
+                                </div>
+                              </div>
+                            )}
 
                             {/* Delete confirmation for batch item */}
                             {deleteConfirmId === req.id && (
