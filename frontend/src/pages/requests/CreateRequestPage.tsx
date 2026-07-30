@@ -882,13 +882,25 @@ export function CreateRequestPage() {
                       onChange={handleFileUpload}
                       className="hidden"
                     />
-                    <button
-                      onClick={() => fileInputRef.current?.click()}
-                      disabled={!selectedTemplate}
-                      className="btn-primary px-8 py-3"
-                    >
-                      <Upload size={18} /> Seleccionar archivo
-                    </button>
+
+                    <div className="flex flex-wrap items-center justify-center gap-3">
+                      <button
+                        onClick={() => fileInputRef.current?.click()}
+                        disabled={!selectedTemplate}
+                        className="btn-primary px-8 py-3"
+                      >
+                        <Upload size={18} /> Seleccionar archivo
+                      </button>
+
+                      {selectedTemplate && filteredVars.length > 0 && (
+                        <button
+                          onClick={downloadTemplate}
+                          className="btn-secondary px-8 py-3"
+                        >
+                          <Download size={18} /> Descargar plantilla Excel
+                        </button>
+                      )}
+                    </div>
 
                     {!selectedTemplate && (
                       <p className="text-xs text-warning-500 mt-3 flex items-center gap-1">
