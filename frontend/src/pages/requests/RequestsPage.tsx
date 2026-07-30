@@ -362,6 +362,11 @@ export function RequestsPage() {
       setSigningRequestIds([]);
       setBatchRequests([]);
       loadRequests();
+
+      // ── Refrescar datos del lote expandido desde la BD ──
+      if (signingBatchId) {
+        fetchBatchItems(signingBatchId);
+      }
     } catch (err: any) {
       toast.error(err.message || 'Error al firmar el lote');
       console.error('❌ Batch sign error:', err);
@@ -420,6 +425,11 @@ export function RequestsPage() {
       setSigningRequestIds([]);
       setBatchRequests([]);
       loadRequests();
+
+      // ── Refrescar datos del lote expandido desde la BD ──
+      if (signingBatchId) {
+        fetchBatchItems(signingBatchId);
+      }
     } catch (err: any) {
       toast.error(err.message || 'Error al rechazar el lote');
       console.error('❌ Batch reject error:', err);
