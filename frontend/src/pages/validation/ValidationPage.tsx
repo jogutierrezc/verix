@@ -29,7 +29,9 @@ const MONTHS = [
   'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre',
 ];
 
-function formatDateToSpanish(dateStr: string): string {
+function formatDateToSpanish(dateStr: string | null | undefined): string {
+  // Defensa ante fechas vacías o indefinidas (p. ej. documentos revocados sin fecha de emisión)
+  if (!dateStr || typeof dateStr !== 'string') return '';
   let match = dateStr.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
   if (match) {
     const day = parseInt(match[1], 10);
@@ -350,14 +352,6 @@ export function ValidationPage() {
   const validationUrl = typeof window !== 'undefined'
     ? window.location.href
     : `https://verix.com/validate/${currentCode || 'demo'}`;
-  const status = statusConfig[request?.status] || {
-    label: 'Estado Desconocido',
-    color: 'text-slate-500 bg-slate-50',
-    badgeColor: 'bg-slate-400',
-    icon: FileText,
-    desc: 'Este documento se encuentra en un estado indeterminado.',
-  };
-  const StatusIcon = status.icon;
 
   // Parse reviewer notes if available
   let reviewerInfo: any = null;
@@ -369,8 +363,23 @@ export function ValidationPage() {
     }
   }
 
+  // Un documento se considera REVOCADO si el status lo indica o si trae señales de
+  // revocación (revoked_at / reviewer_notes.revoked), aunque el status esté desactualizado.
+  const isRevoked = request?.status === 'REVOKED'
+    || Boolean(request?.revoked_at)
+    || reviewerInfo?.revoked === true;
+
+  const status = statusConfig[isRevoked ? 'REVOKED' : (request?.status || '')] || {
+    label: 'Estado Desconocido',
+    color: 'text-slate-500 bg-slate-50',
+    badgeColor: 'bg-slate-400',
+    icon: FileText,
+    desc: 'Este documento se encuentra en un estado indeterminado.',
+  };
+  const StatusIcon = status.icon;
+
   // Derived selected signature for PDF generation (matches renderTemplateToPdf interface)
-  const selectedSignature = request?.status === 'REVOKED'
+  const selectedSignature = isRevoked
     ? null
     : (reviewerInfo?.signature_url || reviewerSignatureUrl)
       ? { signature_image_url: reviewerInfo?.signature_url || reviewerSignatureUrl }
@@ -384,7 +393,9 @@ export function ValidationPage() {
   const rawConfig = templateConfig || {};
   const elements: any[] = rawConfig?.elements || [];
   const hasTemplateElements = elements.length > 0;
-  const canDownloadPdf = hasTemplateElements || hasSignedPdf || isSignedStatus;
+  // Solo los documentos aprobados o firmados pueden descargarse (revocado, pendiente, borrador, etc. no)
+  const isDownloadableStatus = !isRevoked && ['APPROVED', 'SIGNED'].includes(request?.status);
+  const canDownloadPdf = isDownloadableStatus && (hasTemplateElements || hasSignedPdf || isSignedStatus);
   const canDownloadSignedPdf = hasSignedPdf;
   const pageOrientation = rawConfig?.orientation || 'landscape';
   const pageSizeName: PageSizeName = rawConfig?.pageSize || 'A4';
@@ -424,6 +435,10 @@ export function ValidationPage() {
   };
 
   const handleDownloadPdf = async () => {
+    if (!canDownloadPdf) {
+      toast.error('Este documento no está disponible para descarga en su estado actual.');
+      return;
+    }
     setPdfLoading(true);
     try {
       if (hasTemplateElements) {
@@ -672,9 +687,9 @@ export function ValidationPage() {
 
               {/* Status Card */}
               <div className={`bg-white rounded-3xl border shadow-xl shadow-slate-100 overflow-hidden relative ${
-                canDownloadPdf ? 'border-emerald-200/80' : 'border-slate-200'
+                isRevoked ? 'border-amber-200' : canDownloadPdf ? 'border-emerald-200/80' : 'border-slate-200'
               }`}>
-                <div className={`h-2 w-full ${canDownloadPdf ? 'bg-gradient-to-r from-emerald-500 to-teal-400' : 'bg-slate-400'}`} />
+                <div className={`h-2 w-full ${isRevoked ? 'bg-gradient-to-r from-amber-500 to-orange-400' : canDownloadPdf ? 'bg-gradient-to-r from-emerald-500 to-teal-400' : request?.status === 'PENDING' ? 'bg-gradient-to-r from-blue-500 to-sky-400' : 'bg-slate-400'}`} />
 
                 <div className="p-6">
                   <div className="flex items-start gap-4">
@@ -874,7 +889,7 @@ export function ValidationPage() {
                       {request.revoke_reason || 'No se especificó un motivo de revocación.'}
                     </p>
                   </div>
-                  {request.revoked_at && (
+                  {request.revoked_at && !isNaN(new Date(request.revoked_at).getTime()) && (
                     <div className="flex items-center gap-2 text-xs text-amber-600">
                       <Clock size={12} />
                       <span>Revocado el {new Date(request.revoked_at).toLocaleDateString('es-CO', {
@@ -931,63 +946,106 @@ export function ValidationPage() {
 
                 <div className="w-full flex items-center justify-between mb-4 z-10 text-slate-400 text-xs">
                   <div className="flex items-center gap-2">
-                    <span className="w-2.5 h-2.5 rounded-full bg-slate-700 block" />
-                    <span className="font-medium tracking-tight text-slate-300">PREVISUALIZACIÓN DEL DOCUMENTO</span>
+                    <span className={`w-2.5 h-2.5 rounded-full block ${isRevoked ? 'bg-amber-500' : 'bg-slate-700'}`} />
+                    <span className="font-medium tracking-tight text-slate-300">
+                      {isRevoked ? 'DOCUMENTO REVOCADO' : 'PREVISUALIZACIÓN DEL DOCUMENTO'}
+                    </span>
                   </div>
-                  <span className="text-[10px] font-mono tracking-wider text-slate-500">
-                    {pageWidth}×{pageHeight} ({pageOrientation === 'landscape' ? 'Apaisado' : 'Vertical'})
-                  </span>
+                  {!isRevoked && (
+                    <span className="text-[10px] font-mono tracking-wider text-slate-500">
+                      {pageWidth}×{pageHeight} ({pageOrientation === 'landscape' ? 'Apaisado' : 'Vertical'})
+                    </span>
+                  )}
                 </div>
 
-                {/* Certificate sheet */}
-                <div className="w-full overflow-x-auto flex justify-center py-2 relative z-10 [&::-webkit-scrollbar]:hidden">
-                  <div className="shadow-2xl hover:shadow-emerald-950/20 transition-all duration-300">
-                    <div
-                      ref={certificateRef}
-                      className="bg-white relative shrink-0 transition-transform origin-top select-none shadow-[0_20px_50px_rgba(0,0,0,0.3)] border border-slate-100"
-                      style={{
-                        width: pageWidth * certScale,
-                        height: pageHeight * certScale,
-                      }}
-                    >
-                      {elements.map((el: any, i: number) => renderElement(el, i))}
-                      {elements.length === 0 && (
-                        <div className="absolute inset-0 flex items-center justify-center text-slate-400">
-                          <div className="text-center">
-                            <FileText size={40} className="mx-auto mb-2 opacity-40" />
-                            <p className="text-sm font-medium">Sin elementos en la plantilla</p>
-                          </div>
+                {isRevoked ? (
+                  /* Documento revocado: no se muestra la previsualización ni se permite descargar */
+                  <div className="w-full flex flex-col items-center justify-center text-center py-20 z-10 relative">
+                    <div className="w-20 h-20 rounded-2xl bg-amber-500/10 border border-amber-500/25 flex items-center justify-center mb-6">
+                      <AlertTriangle size={36} className="text-amber-400" />
+                    </div>
+                    <p className="text-lg font-black text-amber-300 tracking-wide uppercase">Documento no disponible</p>
+                    <p className="text-xs text-slate-400 mt-2.5 max-w-md leading-relaxed">
+                      Este certificado fue <strong className="text-amber-300">revocado</strong> por la entidad emisora
+                      y ya no puede consultarse ni descargarse.
+                    </p>
+                    {request.revoke_reason && (
+                      <p className="text-[11px] text-amber-200/80 mt-5 max-w-md bg-amber-500/10 border border-amber-500/20 rounded-xl px-4 py-2.5 leading-relaxed">
+                        <strong>Motivo:</strong> {request.revoke_reason}
+                      </p>
+                    )}
+                    {request.revoked_at && !isNaN(new Date(request.revoked_at).getTime()) && (
+                      <p className="text-[10px] text-slate-500 mt-4">
+                        Revocado el {new Date(request.revoked_at).toLocaleDateString('es-CO', { day: 'numeric', month: 'long', year: 'numeric' })}
+                      </p>
+                    )}
+                  </div>
+                ) : (
+                  <>
+                    {/* Certificate sheet */}
+                    <div className="w-full overflow-x-auto flex justify-center py-2 relative z-10 [&::-webkit-scrollbar]:hidden">
+                      <div className="shadow-2xl hover:shadow-emerald-950/20 transition-all duration-300">
+                        <div
+                          ref={certificateRef}
+                          className="bg-white relative shrink-0 transition-transform origin-top select-none shadow-[0_20px_50px_rgba(0,0,0,0.3)] border border-slate-100"
+                          style={{
+                            width: pageWidth * certScale,
+                            height: pageHeight * certScale,
+                          }}
+                        >
+                          {elements.map((el: any, i: number) => renderElement(el, i))}
+                          {elements.length === 0 && (
+                            <div className="absolute inset-0 flex items-center justify-center text-slate-400">
+                              <div className="text-center">
+                                <FileText size={40} className="mx-auto mb-2 opacity-40" />
+                                <p className="text-sm font-medium">Sin elementos en la plantilla</p>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Download button row */}
+                    <div className="w-full mt-6 pt-4 border-t border-slate-800 z-10 flex flex-col sm:flex-row gap-3 items-center justify-between">
+                      <div className="text-slate-400 text-[11px] text-center sm:text-left">
+                        <p className="font-semibold text-slate-300">
+                          {canDownloadPdf ? '¿Desea archivar el documento original?' : 'Documento en verificación'}
+                        </p>
+                        <p className="text-slate-500">
+                          {canDownloadPdf
+                            ? 'Se descargará un PDF de alta resolución con firmas digitales.'
+                            : 'La descarga estará disponible cuando el documento sea aprobado.'}
+                        </p>
+                      </div>
+
+                      {canDownloadPdf ? (
+                        <button
+                          onClick={handleDownloadPdf}
+                          disabled={pdfLoading}
+                          className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-6 py-3 bg-gradient-to-r from-emerald-600 to-teal-500 hover:from-emerald-700 hover:to-teal-600 text-white font-bold rounded-xl transition-all shadow-lg shadow-emerald-950/40 disabled:opacity-50 disabled:cursor-not-allowed hover:-translate-y-0.5 active:translate-y-0 text-sm"
+                        >
+                          {pdfLoading ? (
+                            <>
+                              <Loader2 size={18} className="animate-spin" />
+                              Generando PDF...
+                            </>
+                          ) : (
+                            <>
+                              <Download size={18} />
+                              Descargar PDF Oficial
+                            </>
+                          )}
+                        </button>
+                      ) : (
+                        <div className="w-full sm:w-auto inline-flex items-center justify-center gap-2.5 px-5 py-3 bg-slate-500/10 border border-slate-500/30 text-slate-300 text-xs font-semibold rounded-xl">
+                          <Clock size={16} className="text-slate-400 shrink-0" />
+                          Descarga no disponible en este estado
                         </div>
                       )}
                     </div>
-                  </div>
-                </div>
-
-                {/* Download button row */}
-                <div className="w-full mt-6 pt-4 border-t border-slate-800 z-10 flex flex-col sm:flex-row gap-3 items-center justify-between">
-                  <div className="text-slate-400 text-[11px] text-center sm:text-left">
-                    <p className="font-semibold text-slate-300">¿Desea archivar el documento original?</p>
-                    <p className="text-slate-500">Se descargará un PDF de alta resolución con firmas digitales.</p>
-                  </div>
-
-                  <button
-                    onClick={handleDownloadPdf}
-                    disabled={pdfLoading || !canDownloadPdf}
-                    className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-6 py-3 bg-gradient-to-r from-emerald-600 to-teal-500 hover:from-emerald-700 hover:to-teal-600 text-white font-bold rounded-xl transition-all shadow-lg shadow-emerald-950/40 disabled:opacity-50 disabled:cursor-not-allowed hover:-translate-y-0.5 active:translate-y-0 text-sm"
-                  >
-                    {pdfLoading ? (
-                      <>
-                        <Loader2 size={18} className="animate-spin" />
-                        Generando PDF...
-                      </>
-                    ) : (
-                      <>
-                        <Download size={18} />
-                        Descargar PDF Oficial
-                      </>
-                    )}
-                  </button>
-                </div>
+                  </>
+                )}
               </div>
 
               {/* Audit Trail */}
@@ -1007,10 +1065,19 @@ export function ValidationPage() {
                   </div>
 
                   <div className="relative">
-                    <span className="absolute -left-6 top-1 w-3.5 h-3.5 rounded-full bg-emerald-500 border-4 border-white flex items-center justify-center shadow-sm" />
-                    <p className="text-xs font-bold text-slate-900 leading-none">Firma Digital Estampada</p>
+                    <span className={`absolute -left-6 top-1 w-3.5 h-3.5 rounded-full border-4 border-white flex items-center justify-center shadow-sm ${
+                      isRevoked ? 'bg-amber-500' : 'bg-emerald-500'
+                    }`} />
+                    <p className={`text-xs font-bold leading-none ${isRevoked ? 'text-amber-700' : 'text-slate-900'}`}>
+                      {isRevoked ? 'Firma Revocada' : 'Firma Digital Estampada'}
+                    </p>
                     <p className="text-[10px] text-slate-500 mt-1">
-                      Clave pública verificada y estampada temporalmente por la entidad autorizada.
+                      {isRevoked
+                        ? (request.revoke_reason
+                            ? `La firma fue anulada por la entidad emisora: ${request.revoke_reason}`
+                            : 'La firma fue anulada por la entidad emisora.')
+                          + (request.revoked_at ? ` (${new Date(request.revoked_at).toLocaleDateString('es-CO', { day: 'numeric', month: 'long', year: 'numeric' })})` : '')
+                        : 'Clave pública verificada y estampada temporalmente por la entidad autorizada.'}
                     </p>
                   </div>
 

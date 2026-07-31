@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef, Fragment } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo, Fragment } from 'react';
 import { useAuth } from '../../hooks/useAuth';
 import { Link, useNavigate } from 'react-router-dom';
 import { supabase } from '../../lib/supabase';
@@ -27,6 +27,9 @@ const statusConfig: Record<string, { label: string; color: string; bg: string; b
   SIGNED: { label: 'Firmado', color: 'text-primary', bg: 'bg-primary-fixed', borderColor: 'border-primary' },
   REVOKED: { label: 'Revocado', color: 'text-on-surface-variant', bg: 'bg-surface-variant', borderColor: 'border-surface-variant' },
 };
+
+// Límite de filas traídas desde la BD. El conteo exacto (vía count) sigue siendo fiel.
+const MAX_ROWS = 10000;
 
 export function RequestsPage() {
   const { user } = useAuth();
@@ -107,11 +110,10 @@ export function RequestsPage() {
   const [batchEditImporting, setBatchEditImporting] = useState(false);
   const batchEditFileInputRef = useRef<HTMLInputElement>(null);
 
-  // ── Pagination ──
+  // ── Pagination (client-side sobre las tarjetas visibles: individuales + lotes) ──
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
-  const [totalCount, setTotalCount] = useState(0);
-  const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
+  const [truncatedTotal, setTruncatedTotal] = useState<number | null>(null);
 
   // ── Debounced search ──
   const [searchInput, setSearchInput] = useState('');
@@ -127,7 +129,7 @@ export function RequestsPage() {
     return () => { if (searchTimerRef.current) clearTimeout(searchTimerRef.current); };
   }, [searchInput]);
 
-  useEffect(() => { loadRequests(); }, [user, statusFilter, page, debouncedSearch]);
+  useEffect(() => { loadRequests(); }, [user, statusFilter, debouncedSearch]);
 
   const loadRequests = async () => {
     setLoading(true);
@@ -152,28 +154,29 @@ export function RequestsPage() {
         );
       }
 
-      // Pagination
-      const from = (page - 1) * pageSize;
-      const to = from + pageSize - 1;
-
+      // Se traen todas las filas que coinciden con los filtros (con tope de seguridad).
+      // La paginación se hace en el cliente sobre las tarjetas visibles (individuales + lotes),
+      // de modo que el conteo mostrado siempre coincide con lo que se ve en pantalla.
       const { data, error, count } = await query
         .order('created_at', { ascending: false })
-        .range(from, to);
+        .limit(MAX_ROWS);
 
       if (error) {
         console.error('❌ Error al cargar solicitudes:', error);
         toast.error('Error al cargar las solicitudes');
         setRequests([]);
+        setTruncatedTotal(null);
         return;
       }
 
       console.log('📋 Solicitudes cargadas:', data?.length || 0, 'Total:', count || 0);
       setRequests(data || []);
-      if (count !== null) setTotalCount(count);
+      setTruncatedTotal(count !== null ? Math.max(0, count - (data?.length || 0)) : null);
     } catch (err) {
       console.error('❌ Error al cargar solicitudes:', err);
       toast.error('Error al cargar las solicitudes');
       setRequests([]);
+      setTruncatedTotal(null);
     } finally {
       setLoading(false);
     }
@@ -1428,6 +1431,42 @@ export function RequestsPage() {
     }
   };
 
+  // ── Listado único: solicitudes individuales + lotes, intercalados por fecha ──
+  const entries = useMemo(() => {
+    const batchMap = new Map<string, any[]>();
+    const individualReqs: any[] = [];
+    for (const req of requests) {
+      if (req.batch_id) {
+        const list = batchMap.get(req.batch_id);
+        if (list) list.push(req);
+        else batchMap.set(req.batch_id, [req]);
+      } else {
+        individualReqs.push(req);
+      }
+    }
+
+    const items: any[] = [];
+    for (const req of individualReqs) {
+      items.push({ type: 'individual', req, sortDate: new Date(req.created_at || 0).getTime() });
+    }
+    for (const [batchId, batchReqs] of batchMap) {
+      const sortDate = Math.min(...batchReqs.map(r => new Date(r.created_at || 0).getTime()));
+      items.push({ type: 'batch', batchId, batchReqs, sortDate });
+    }
+    items.sort((a, b) => (b.sortDate || 0) - (a.sortDate || 0));
+    return items;
+  }, [requests]);
+
+  const totalEntries = entries.length;
+  const totalPages = Math.max(1, Math.ceil(totalEntries / pageSize));
+  const safePage = Math.min(page, totalPages);
+  const pageEntries = entries.slice((safePage - 1) * pageSize, safePage * pageSize);
+
+  // Si la página actual queda fuera de rango (p. ej. cambiaron los filtros), volver a la 1
+  useEffect(() => {
+    if (page > totalPages) setPage(1);
+  }, [totalPages, page]);
+
   return (      <div className="max-w-screen-2xl mx-auto px-4 md:px-6 xl:px-8 space-y-6 animate-fade-in min-h-screen pb-24 md:pb-12">
       {/* Header */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
@@ -1448,7 +1487,7 @@ export function RequestsPage() {
             <input type="text" placeholder="Buscar..." className="input pl-9 pr-2 w-full text-sm h-10"
               value={searchInput} onChange={e => setSearchInput(e.target.value)} />
           </div>
-          <select className="input w-auto min-w-[100px] text-sm h-10" value={statusFilter} onChange={e => setStatusFilter(e.target.value)}>
+          <select className="input w-auto min-w-[100px] text-sm h-10" value={statusFilter} onChange={e => { setStatusFilter(e.target.value); setPage(1); }}>
             <option value="">Todos</option>
             {Object.entries(statusConfig).map(([k, v]) => (
               <option key={k} value={k}>{v.label}</option>
@@ -1518,32 +1557,9 @@ export function RequestsPage() {
             <p className="text-body-lg text-on-surface-variant">No hay solicitudes</p>
             <p className="text-body-md text-on-surface-variant/60 mt-1">Las solicitudes aparecerán aquí</p>
           </div>
-        ) : (() => {
-          // ── Deduplicate batches: each unique batch_id appears ONCE per page ──
-          const seenBatchIds = new Set<string>();
-          const individualReqs: any[] = [];
-          for (const req of filtered) {
-            if (req.batch_id) {
-              seenBatchIds.add(req.batch_id);
-            } else {
-              individualReqs.push(req);
-            }
-          }
-
-          const allItems: any[] = [];
-
-          // Add individual (non-batch) requests first
-          for (const req of individualReqs) {
-            allItems.push({ type: 'individual', req });
-          }
-
-          // Add each unique batch ONCE (the paginated subset is just for preview info)
-          for (const batchId of seenBatchIds) {
-            const batchReqs = filtered.filter(req => req.batch_id === batchId);
-            allItems.push({ type: 'batch', batchId, batchReqs });
-          }
-
-          return allItems.map((item: any) => {
+        ) : (
+          // Las tarjetas visibles ya están deduplicadas y paginadas en `pageEntries`
+          pageEntries.map((item: any) => {
             if (item.type === 'individual') {
               const req = item.req;
               const status = statusConfig[req.status] || { label: req.status, color: '', bg: '', borderColor: '' };
@@ -1755,7 +1771,7 @@ export function RequestsPage() {
                       </span>
                     </div>
                     <p className="text-xs text-on-surface-variant/70 mt-0.5">
-                      Creado {format(new Date(firstReq.created_at), 'dd/MM/yyyy')}
+                      Creado {format(new Date(item.sortDate || firstReq.created_at), 'dd/MM/yyyy')}
                       {firstReq.template?.name && ` · ${firstReq.template.name}`}
                     </p>
                     {/* Barra de progreso */}
@@ -2066,16 +2082,25 @@ export function RequestsPage() {
                 )}
               </div>
             );
-          });
-        })()}
+          }))}
       </div>
 
+      {/* Aviso si hay más solicitudes de las que se cargaron (límite de seguridad) */}
+      {truncatedTotal !== null && truncatedTotal > 0 && (
+        <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-xl px-4 py-2.5 flex items-center gap-2">
+          <AlertTriangle size={14} className="text-amber-600 shrink-0" />
+          Hay {truncatedTotal} solicitudes más. Usa la búsqueda o los filtros para encontrarlas.
+        </p>
+      )}
+
       {/* Pagination - simplified on mobile */}
-      {!loading && totalCount > pageSize && (
+      {!loading && totalEntries > pageSize && (
         <div className="flex flex-col sm:flex-row items-center justify-between gap-2 pt-2 pb-4">
           <p className="text-xs sm:text-sm text-on-surface-variant/70 order-2 sm:order-1">
-            <span className="hidden sm:inline">{(page - 1) * pageSize + 1}–{Math.min(page * pageSize, totalCount)} de {totalCount} resultados</span>
-            <span className="sm:hidden">Pág {page}/{totalPages}</span>
+            <span className="hidden sm:inline">
+              {(safePage - 1) * pageSize + 1}–{Math.min(safePage * pageSize, totalEntries)} de {totalEntries} {totalEntries === 1 ? 'solicitud' : 'solicitudes'}
+            </span>
+            <span className="sm:hidden">Pág {safePage}/{totalPages}</span>
           </p>
           <div className="flex items-center gap-1 order-1 sm:order-2">
             <button
