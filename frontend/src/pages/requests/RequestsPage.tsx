@@ -1991,49 +1991,115 @@ export function RequestsPage() {
                 }`}
               >
                 <div className="flex-1 grid grid-cols-1 md:grid-cols-4 gap-2 text-sm">
-                  <div>
-                    <span className="text-[10px] uppercase tracking-wider text-on-surface-variant/50 font-bold block">Código</span>
-                    <span className="font-mono text-xs font-semibold text-primary">{req.code}</span>
-                  </div>
-                  <div>
-                    <span className="text-[10px] uppercase tracking-wider text-on-surface-variant/50 font-bold block">Estudiante</span>
-                    <span className="text-xs text-on-surface">{getStudentName(req)}</span>
-                  </div>
-                  <div>
-                    <span className="text-[10px] uppercase tracking-wider text-on-surface-variant/50 font-bold block">Documento</span>
-                    <span className="text-xs text-on-surface-variant">{getStudentDocument(req)}</span>
-                  </div>
-                  <div className="flex items-center justify-between gap-2">
-                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${status.color} ${status.bg}`}>
-                      {status.label}
-                    </span>
-                    <div className="flex items-center gap-1">
-                      {['PENDING', 'IN_REVIEW'].includes(req.status) && (user?.role === 'SIGNER' || user?.role === 'ADMIN') && (
-                        <>
-                          <button
-                            onClick={(e) => { e.stopPropagation(); setPreviewRequestId(req.id); }}
-                            className="p-1.5 hover:bg-primary/10 rounded-full text-primary transition-colors"
-                            title="Vista previa"
-                          >
-                            <Eye size={15} />
-                          </button>
-                          <button
-                            onClick={(e) => { e.stopPropagation(); handleApproveSingle(req.id); }}
-                            disabled={loadingItemId === req.id}
-                            className="p-1.5 hover:bg-primary/10 rounded-full text-primary transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                            title="Aprobar solicitud"
-                          >
-                            {loadingItemId === req.id ? <Loader2 size={15} className="animate-spin" /> : <CheckCircle size={15} />}
-                          </button>
-                          <button
-                            onClick={(e) => { e.stopPropagation(); setSelected(selected === req.id ? null : req.id); }}
-                            className="p-1.5 hover:bg-error/10 rounded-full text-error transition-colors"
-                            title="Rechazar solicitud"
-                          >
-                            <XCircle size={15} />
-                          </button>
-                        </>
-                      )}
+                      <div>
+                        <span className="text-[10px] uppercase tracking-wider text-on-surface-variant/50 font-bold block">Código</span>
+                        <span className="font-mono text-xs font-semibold text-primary">{req.code}</span>
+                      </div>
+                      <div>
+                        <span className="text-[10px] uppercase tracking-wider text-on-surface-variant/50 font-bold block">Estudiante</span>
+                        <span className="text-xs text-on-surface">{getStudentName(req)}</span>
+                      </div>
+                      <div>
+                        <span className="text-[10px] uppercase tracking-wider text-on-surface-variant/50 font-bold block">Documento</span>
+                        <span className="text-xs text-on-surface-variant">{getStudentDocument(req)}</span>
+                      </div>
+                      <div className="flex items-center justify-between gap-2">
+                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${status.color} ${status.bg}`}>
+                          {status.label}
+                        </span>
+                        <div className="flex items-center gap-1">
+                          {user?.role === 'APPLICANT' && EDITABLE_STATUSES.includes(req.status) && (
+                            <Link
+                              to={`/requests/edit/${req.id}`}
+                              onClick={(e) => e.stopPropagation()}
+                              className="p-1.5 hover:bg-primary/10 rounded-full text-primary transition-colors"
+                              title="Editar solicitud"
+                            >
+                              <Edit size={15} />
+                            </Link>
+                          )}
+                          {(req.status === 'APPROVED' || req.status === 'SIGNED') && (
+                            <>
+                              <button
+                                onClick={(e) => { e.stopPropagation(); setPreviewRequestId(req.id); }}
+                                className="p-1.5 hover:bg-primary/10 rounded-full text-primary transition-colors"
+                                title="Ver certificado"
+                              >
+                                <Eye size={15} />
+                              </button>
+                              <button
+                                onClick={(e) => { e.stopPropagation(); downloadSignedPdf(req); }}
+                                disabled={downloading}
+                                className="p-1.5 hover:bg-primary/10 rounded-full text-primary transition-colors"
+                                title="Descargar PDF con Firma Electrónica"
+                              >
+                                <Download size={15} />
+                              </button>
+                              {(user?.role === 'SIGNER' || user?.role === 'ADMIN') && (
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); setSelected(null); setRevokeReason(''); setRevokeSelectedId(req.id); }}
+                                  className="p-1.5 hover:bg-amber-100 rounded-full text-amber-700 transition-colors"
+                                  title="Revocar firma"
+                                >
+                                  <AlertTriangle size={15} />
+                                </button>
+                              )}
+                            </>
+                          )}
+                          {(req.status === 'APPROVED' || req.status === 'SIGNED') && (
+                            <>
+                              <button
+                                onClick={(e) => { e.stopPropagation(); setPreviewRequestId(req.id); }}
+                                className="p-1.5 hover:bg-primary/10 rounded-full text-primary transition-colors"
+                                title="Ver certificado"
+                              >
+                                <Eye size={15} />
+                              </button>
+                              <button
+                                onClick={(e) => { e.stopPropagation(); downloadSignedPdf(req); }}
+                                disabled={downloading}
+                                className="p-1.5 hover:bg-primary/10 rounded-full text-primary transition-colors"
+                                title="Descargar PDF con Firma Electrónica"
+                              >
+                                <Download size={15} />
+                              </button>
+                              {(user?.role === 'SIGNER' || user?.role === 'ADMIN') && (
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); setSelected(null); setRevokeReason(''); setRevokeSelectedId(req.id); }}
+                                  className="p-1.5 hover:bg-amber-100 rounded-full text-amber-700 transition-colors"
+                                  title="Revocar firma"
+                                >
+                                  <AlertTriangle size={15} />
+                                </button>
+                              )}
+                            </>
+                          )}
+                          {['PENDING', 'IN_REVIEW'].includes(req.status) && (user?.role === 'SIGNER' || user?.role === 'ADMIN') && (
+                            <>
+                              <button
+                                onClick={(e) => { e.stopPropagation(); setPreviewRequestId(req.id); }}
+                                className="p-1.5 hover:bg-primary/10 rounded-full text-primary transition-colors"
+                                title="Vista previa"
+                              >
+                                <Eye size={15} />
+                              </button>
+                              <button
+                                onClick={(e) => { e.stopPropagation(); handleApproveSingle(req.id); }}
+                                disabled={loadingItemId === req.id}
+                                className="p-1.5 hover:bg-primary/10 rounded-full text-primary transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                                title="Aprobar solicitud"
+                              >
+                                {loadingItemId === req.id ? <Loader2 size={15} className="animate-spin" /> : <CheckCircle size={15} />}
+                              </button>
+                              <button
+                                onClick={(e) => { e.stopPropagation(); setSelected(selected === req.id ? null : req.id); }}
+                                className="p-1.5 hover:bg-error/10 rounded-full text-error transition-colors"
+                                title="Rechazar solicitud"
+                              >
+                                <XCircle size={15} />
+                              </button>
+                            </>
+                          )}
                       {(req.status === 'APPROVED' || req.status === 'SIGNED') && (
                         <>
                           <button
@@ -2062,25 +2128,15 @@ export function RequestsPage() {
                           )}
                         </>
                       )}
-                      {/* Applicant: edit individual batch item */}
+                      {/* Applicant: delete batch item */}
                       {user?.role === 'APPLICANT' && EDITABLE_STATUSES.includes(req.status) && (
-                        <>
-                          <Link
-                            to={`/requests/edit/${req.id}`}
-                            onClick={(e) => e.stopPropagation()}
-                            className="p-1.5 hover:bg-primary/10 rounded-full text-primary transition-colors"
-                            title={`Editar ${req.code}`}
-                          >
-                            <Edit size={15} />
-                          </Link>
-                          <button
-                            onClick={(e) => { e.stopPropagation(); setDeleteConfirmId(deleteConfirmId === req.id ? null : req.id); }}
-                            className="p-1.5 hover:bg-error/10 rounded-full text-error transition-colors"
-                            title={`Eliminar ${req.code}`}
-                          >
-                            <Trash2 size={15} />
-                          </button>
-                        </>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); setDeleteConfirmId(deleteConfirmId === req.id ? null : req.id); }}
+                          className="p-1.5 hover:bg-error/10 rounded-full text-error transition-colors"
+                          title={`Eliminar ${req.code}`}
+                        >
+                          <Trash2 size={15} />
+                        </button>
                       )}
                     </div>
                   </div>
