@@ -659,7 +659,8 @@ export function RequestsPage() {
   };
 
   // Search is now server-side via debouncedSearch → no client-side filtering needed
-  const filtered = requests;
+  // Filter out revoked items from the main list
+  const filtered = requests.filter(req => req.status !== 'REVOKED');
 
   const eligibleDownloadRequests = requests.filter(req =>
     req.certificate_url && ['APPROVED', 'SIGNED'].includes(req.status),
@@ -784,6 +785,17 @@ export function RequestsPage() {
   const handleDeleteBatch = async (batchId: string) => {
     setDeleting(true);
     try {
+      // First, get all items in the batch to count them
+      const { data: batchItems, error: fetchError } = await supabase
+        .from('certificate_requests')
+        .select('id')
+        .eq('batch_id', batchId);
+      
+      if (fetchError) throw fetchError;
+      
+      const itemCount = batchItems?.length || 0;
+      
+      // Delete all items in the batch (regardless of status)
       const { error } = await supabase.from('certificate_requests').delete().eq('batch_id', batchId);
       if (error) throw error;
 
@@ -801,7 +813,7 @@ export function RequestsPage() {
           entity_id: batchId,
           entity_type: 'certificate_request_batch',
           ip_address: ip,
-          description: 'Lote completo eliminado por el solicitante',
+          description: `Lote completo eliminado por el solicitante (${itemCount} solicitudes)`,
         });
       } catch { /* silent */ }
 
@@ -1435,7 +1447,11 @@ export function RequestsPage() {
   const entries = useMemo(() => {
     const batchMap = new Map<string, any[]>();
     const individualReqs: any[] = [];
+    
     for (const req of requests) {
+      // Filter out revoked items from the list
+      if (req.status === 'REVOKED') continue;
+      
       if (req.batch_id) {
         const list = batchMap.get(req.batch_id);
         if (list) list.push(req);
@@ -1450,6 +1466,9 @@ export function RequestsPage() {
       items.push({ type: 'individual', req, sortDate: new Date(req.created_at || 0).getTime() });
     }
     for (const [batchId, batchReqs] of batchMap) {
+      // If batch has no items (all revoked or deleted), skip it
+      if (batchReqs.length === 0) continue;
+      
       const sortDate = Math.min(...batchReqs.map(r => new Date(r.created_at || 0).getTime()));
       items.push({ type: 'batch', batchId, batchReqs, sortDate });
     }
