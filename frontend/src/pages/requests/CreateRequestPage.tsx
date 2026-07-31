@@ -9,11 +9,11 @@ import * as XLSX from 'xlsx';
 import { SkeletonCard } from '../../components/ui/SkeletonCard';
 
 /** Variables del sistema que se asignan automáticamente (no se muestran al usuario) */
-const SYSTEM_VARS = new Set(['codigo', 'codigo_certificado', 'radicado', 'consecutivo']);
+export const SYSTEM_VARS = new Set(['codigo', 'codigo_certificado', 'radicado', 'consecutivo']);
 
 type CreationType = 'single' | 'multiple';
 
-const extractTemplateVariables = (template: any): string[] => {
+export const extractTemplateVariables = (template: any): string[] => {
   if (template?.config && Array.isArray(template.config.elements)) {
     const regex = /{{\s*([^}\s]+)\s*}}/g;
     const vars = new Set<string>();

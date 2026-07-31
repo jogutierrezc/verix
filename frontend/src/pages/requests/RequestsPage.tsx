@@ -14,6 +14,7 @@ import type { TemplateElement } from '../../components/editor/TemplateCanvas';
 import { getPageDimensions, type PageSizeName } from '../../lib/pageSizes';
 import { SkeletonCard } from '../../components/ui/SkeletonCard';
 import { Modal } from '../../components/ui/Modal';
+import { extractTemplateVariables, SYSTEM_VARS } from './CreateRequestPage';
 
 const EDITABLE_STATUSES = ['DRAFT', 'PENDING', 'IN_REVIEW', 'REJECTED'];
 
@@ -1250,29 +1251,57 @@ export function RequestsPage() {
   };
 
   // ── Download batch data as Excel (for applicant editing) ──
-  const downloadBatchAsExcel = (batchId: string, batchReqs: any[]) => {
+  // Exporta cada campo TAL COMO se llenó en el formulario: mismas columnas y orden de la
+  // plantilla (incluye campos vacíos), para poder DUPLICAR o MODIFICAR el lote reimportando el archivo.
+  const downloadBatchAsExcel = async (batchId: string, batchReqs: any[]) => {
     if (batchReqs.length === 0) {
       toast.error('No hay solicitudes en este lote');
       return;
     }
 
     try {
-      // Get all unique data keys from all items
+      // 1. Obtener las variables de la plantilla en su orden exacto (igual que el formulario)
+      let templateKeys: string[] = [];
+      const templateId = batchReqs.find(r => r.template_id)?.template_id;
+      if (templateId) {
+        const { data: tmpl } = await supabase
+          .from('templates')
+          .select('config')
+          .eq('id', templateId)
+          .single();
+
+        if (tmpl) {
+          const rawConfig = tmpl.config?.elements
+            ? tmpl.config
+            : tmpl.config?.config
+              ? (typeof tmpl.config.config === 'string' ? safeJsonParse(tmpl.config.config) : tmpl.config.config)
+              : typeof tmpl.config === 'string' ? safeJsonParse(tmpl.config) : (tmpl.config || {});
+          templateKeys = extractTemplateVariables({ config: rawConfig }).filter(v => !SYSTEM_VARS.has(v));
+        }
+      }
+
+      // 2. Asegurar que también se incluyan campos guardados que ya no estén en la plantilla
       const allDataKeys = new Set<string>();
       batchReqs.forEach(req => {
         if (req.data) Object.keys(req.data).forEach(k => allDataKeys.add(k));
       });
-      const dataKeys = Array.from(allDataKeys);
+      const dataKeys = Array.from(allDataKeys).filter(k => !SYSTEM_VARS.has(k));
+      if (templateKeys.length === 0) {
+        templateKeys = dataKeys;
+      } else {
+        dataKeys.forEach(k => { if (!templateKeys.includes(k)) templateKeys.push(k); });
+      }
 
-      // Build rows with code + all data fields
+      // 3. Construir filas: encabezados = campos del formulario (nombres de variable exactos)
       const rows = batchReqs.map((req, idx) => {
         const row: Record<string, string> = {
           '#': String(idx + 1),
           'Código': req.code || '',
-          'Estado': req.status || '',
+          'Estado solicitud': req.status || '',
         };
-        dataKeys.forEach(key => {
-          row[key.replace(/_/g, ' ')] = req.data?.[key] || '';
+        templateKeys.forEach(key => {
+          const value = req.data?.[key];
+          row[key] = value !== undefined && value !== null ? String(value) : '';
         });
         return row;
       });
@@ -1286,9 +1315,64 @@ export function RequestsPage() {
       const wb = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(wb, ws, 'Lote');
 
+      // 4. Hoja de instrucciones para duplicar o modificar el lote
+      const instructionsWs = XLSX.utils.aoa_to_sheet([
+        ['INSTRUCCIONES - DATOS DEL LOTE'],
+        [''],
+        ['1. Esta hoja contiene los datos de cada solicitud tal como se enviaron al llenar el formulario.'],
+        ['2. Para DUPLICAR el lote: sube este archivo en "Nueva solicitud" → "Múltiples solicitudes".'],
+        ['3. Para MODIFICAR: edita las celdas e importa el archivo desde el botón "Editar lote" de la lista.'],
+        ['4. Los encabezados coinciden con los campos de la plantilla. No los cambies.'],
+        ['5. Los campos código, radicado y consecutivo se asignan automáticamente.'],
+        ['6. La hoja "Datos originales" conserva las columnas exactas del archivo Excel subido.'],
+        [''],
+        ['Campos de la plantilla:'],
+        ...templateKeys.map(k => [`  • ${k.replace(/_/g, ' ')}`]),
+      ]);
+      instructionsWs['!cols'] = [{ wch: 80 }];
+      XLSX.utils.book_append_sheet(wb, instructionsWs, 'Instrucciones');
+
+      // 5. Hoja adicional con los datos originales del Excel subido (si existen)
+      const originalRows = batchReqs
+        .map((req, idx): { row: Record<string, unknown>; idx: number } | null => {
+          let row: Record<string, unknown> | null = null;
+          const od = req.original_data;
+          if (od && typeof od === 'string') {
+            const parsed = safeJsonParse(od);
+            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) row = parsed as Record<string, unknown>;
+          } else if (od && typeof od === 'object' && !Array.isArray(od)) {
+            row = od as Record<string, unknown>;
+          }
+          return row && Object.keys(row).length > 0 ? { row, idx } : null;
+        })
+        .filter((x): x is { row: Record<string, unknown>; idx: number } => x !== null);
+
+      if (originalRows.length > 0) {
+        const originalKeys = new Set<string>();
+        originalRows.forEach(({ row }) => Object.keys(row).forEach(k => originalKeys.add(k)));
+        const originalCols = Array.from(originalKeys);
+
+        const originalSheetRows = originalRows.map(({ row, idx }) => {
+          const r: Record<string, string> = {
+            '#': String(idx + 1),
+            'Código': batchReqs[idx]?.code || '',
+          };
+          originalCols.forEach(k => {
+            const v = row[k];
+            r[k] = v !== undefined && v !== null ? String(v) : '';
+          });
+          return r;
+        });
+
+        const wsOrig = XLSX.utils.json_to_sheet(originalSheetRows);
+        const origCols = Object.keys(originalSheetRows[0] || {});
+        wsOrig['!cols'] = origCols.map(c => ({ wch: Math.max(c.length + 3, 15) }));
+        XLSX.utils.book_append_sheet(wb, wsOrig, 'Datos originales');
+      }
+
       const batchCode = batchReqs[0]?.code?.substring(0, 10) || batchId.substring(0, 8);
       XLSX.writeFile(wb, `lote-${batchCode}-datos.xlsx`);
-      toast.success('✅ Excel del lote descargado');
+      toast.success('✅ Excel del lote descargado (formulario + datos originales del Excel)');
     } catch (err: any) {
       console.error('Error generando Excel:', err);
       toast.error('Error al generar el Excel del lote');
@@ -1779,9 +1863,9 @@ export function RequestsPage() {
                   {user?.role === 'APPLICANT' && displayItems.some((r: any) => EDITABLE_STATUSES.includes(r.status)) && (
                     <>
                       <button
-                        onClick={async (e) => { e.stopPropagation(); const cachedItems = batchItemsCache.get(batchId); const items = cachedItems || await fetchBatchItems(batchId); downloadBatchAsExcel(batchId, items); }}
+                        onClick={async (e) => { e.stopPropagation(); const cachedItems = batchItemsCache.get(batchId); const items = cachedItems || await fetchBatchItems(batchId); void downloadBatchAsExcel(batchId, items); }}
                         className="btn-secondary btn-xs px-3 py-1.5 text-xs"
-                        title="Descargar datos del lote como Excel para editarlos"
+                        title="Descargar datos del lote en formato de plantilla (para duplicar o editar)"
                       >
                         <Table size={14} /> Descargar Excel
                       </button>
@@ -2220,7 +2304,7 @@ export function RequestsPage() {
                         <Upload size={18} /> Seleccionar archivo
                       </button>
                       <button
-                        onClick={() => downloadBatchAsExcel(batchEditBatchId!, batchEditRequests)}
+                        onClick={() => void downloadBatchAsExcel(batchEditBatchId!, batchEditRequests)}
                         className="btn-secondary px-8 py-3"
                       >
                         <Download size={18} /> Descargar datos actuales
