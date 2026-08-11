@@ -1,8 +1,9 @@
 import { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { supabase } from '../../lib/supabase';
-import { usersApi } from '../../services/api';
-import { Plus, Search, UserCheck, UserX, Users as UsersIcon, Building2, Layers, X, Lock, Eye, EyeOff } from 'lucide-react';
+import { usersApi, userPermissionsApi } from '../../services/api';
+import { useAuth } from '../../hooks/useAuth';
+import { Plus, Search, UserCheck, UserX, Users as UsersIcon, Building2, Layers, X, Lock, Eye, EyeOff, Shield, FileSpreadsheet, Check, ChevronDown, ChevronUp } from 'lucide-react';
 import toast from 'react-hot-toast';
 
 const roleConfig: Record<string, { label: string; bg: string; color: string }> = {
@@ -12,6 +13,7 @@ const roleConfig: Record<string, { label: string; bg: string; color: string }> =
 };
 
 export function UsersPage() {
+  const { refreshUser } = useAuth();
   const [users, setUsers] = useState<any[]>([]);
   const [institutions, setInstitutions] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -33,8 +35,22 @@ export function UsersPage() {
   const [newPassword, setNewPassword] = useState('');
   const [showNewPassword, setShowNewPassword] = useState(false);
   const [resettingPassword, setResettingPassword] = useState(false);
+  
+  // Permissions modal state
+  const [permissionsUser, setPermissionsUser] = useState<any>(null);
+  const [permissionsLoading, setPermissionsLoading] = useState(false);
+  const [permissionsSaving, setPermissionsSaving] = useState(false);
+  const [templates, setTemplates] = useState<any[]>([]);
+  const [allowedTemplateIds, setAllowedTemplateIds] = useState<string[]>([]);
+  const [canCreateRequests, setCanCreateRequests] = useState(true);
+  const [canViewAllRequests, setCanViewAllRequests] = useState(false);
+  const [selectAllTemplates, setSelectAllTemplates] = useState(true);
+  const [templatesLoading, setTemplatesLoading] = useState(false);
+  
+  // Permissions count per user (for badge display)
+  const [userPermissionsMap, setUserPermissionsMap] = useState<Map<string, { count: number; total: number }>>(new Map());
 
-  useEffect(() => { loadUsers(); loadInstitutions(); }, []);
+  useEffect(() => { loadUsers(); loadInstitutions(); loadTemplates(); }, []);
 
   const loadUsers = async () => {
     setLoading(true);
@@ -44,10 +60,63 @@ export function UsersPage() {
         .select('*, institution:institutions(name)')
         .order('created_at', { ascending: false });
       setUsers(data || []);
+      // Load permissions for all non-ADMIN users
+      if (data && data.length > 0) {
+        await loadPermissionsForUsers(data.filter(u => u.role !== 'ADMIN'));
+      }
     } catch (err) {
       console.error('Error loading users:', err);
     } finally {
       setLoading(false);
+    }
+  };
+
+  // Load permissions count for all non-ADMIN users
+  const loadPermissionsForUsers = async (nonAdminUsers: any[]) => {
+    try {
+      // Check if user_permissions table exists first
+      const { error: tableCheck } = await supabase
+        .from('user_permissions')
+        .select('user_id')
+        .limit(1);
+      
+      // If table doesn't exist, skip loading permissions
+      if (tableCheck && tableCheck.message?.includes('does not exist')) {
+        console.warn('user_permissions table does not exist. Run the SQL migration first.');
+        return;
+      }
+      
+      const { data: permissions } = await supabase
+        .from('user_permissions')
+        .select('user_id, allowed_template_ids');
+      
+      if (!permissions) return;
+      
+      // Get total active templates count
+      const { count: totalTemplates } = await supabase
+        .from('templates')
+        .select('*', { count: 'exact', head: true })
+        .eq('is_active', true);
+      
+      const permMap = new Map<string, { count: number; total: number }>();
+      for (const perm of permissions) {
+        const templateCount = perm.allowed_template_ids?.length || 0;
+        permMap.set(perm.user_id, { 
+          count: templateCount, 
+          total: totalTemplates || 0 
+        });
+      }
+      
+      // For users without permissions record, they have access to all templates
+      for (const user of nonAdminUsers) {
+        if (!permMap.has(user.id)) {
+          permMap.set(user.id, { count: -1, total: totalTemplates || 0 }); // -1 means "all"
+        }
+      }
+      
+      setUserPermissionsMap(permMap);
+    } catch (err) {
+      console.error('Error loading permissions:', err);
     }
   };
 
@@ -57,6 +126,136 @@ export function UsersPage() {
       setInstitutions(data || []);
     } catch (err) {
       console.error('Error loading institutions:', err);
+    }
+  };
+
+  // Load templates for permissions modal
+  const loadTemplates = async () => {
+    setTemplatesLoading(true);
+    try {
+      const { data } = await supabase
+        .from('templates')
+        .select('id, name, code, category, dependency:dependencies(name)')
+        .eq('is_active', true)
+        .order('name');
+      setTemplates(data || []);
+    } catch (err) {
+      console.error('Error loading templates:', err);
+    } finally {
+      setTemplatesLoading(false);
+    }
+  };
+
+  // Get permissions badge info for a user
+  const getPermissionsBadge = (userId: string) => {
+    const perms = userPermissionsMap.get(userId);
+    if (!perms) return null;
+    
+    if (perms.count === -1) {
+      // User has access to all templates
+      return { label: 'Todas', variant: 'primary' as const };
+    } else if (perms.count === 0) {
+      // User has no specific templates assigned (but no permissions record = all access)
+      return null;
+    } else {
+      return { 
+        label: `${perms.count}/${perms.total}`, 
+        variant: 'secondary' as const 
+      };
+    }
+  };
+
+  // Open permissions modal for a user
+  const openPermissionsModal = async (user: any) => {
+    console.log('Opening permissions modal for user:', user.id, user.email);
+    setPermissionsUser(user);
+    setPermissionsLoading(true);
+    setSelectAllTemplates(true);
+    setAllowedTemplateIds([]);
+    setCanCreateRequests(true);
+    setCanViewAllRequests(false);
+    
+    // Load templates if not loaded yet
+    if (templates.length === 0) {
+      console.log('Loading templates...');
+      await loadTemplates();
+    }
+    
+    // Load user's current permissions
+    try {
+      console.log('Loading permissions for user:', user.id);
+      const permissions = await userPermissionsApi.getByUserId(user.id);
+      console.log('Loaded permissions:', permissions);
+      if (permissions) {
+        setAllowedTemplateIds(permissions.allowed_template_ids || []);
+        setCanCreateRequests(permissions.can_create_requests ?? true);
+        setCanViewAllRequests(permissions.can_view_all_requests ?? false);
+        // If user has specific templates, not all
+        if (permissions.allowed_template_ids && permissions.allowed_template_ids.length > 0) {
+          setSelectAllTemplates(false);
+        }
+      }
+    } catch (err) {
+      console.error('Error loading permissions:', err);
+    } finally {
+      setPermissionsLoading(false);
+    }
+  };
+
+  // Save permissions
+  const handleSavePermissions = async () => {
+    if (!permissionsUser) return;
+    setPermissionsSaving(true);
+    
+    const templateIds = selectAllTemplates ? [] : allowedTemplateIds;
+    console.log('Saving permissions for user:', permissionsUser.id);
+    console.log('  selectAllTemplates:', selectAllTemplates);
+    console.log('  templateIds:', templateIds);
+    console.log('  canCreateRequests:', canCreateRequests);
+    console.log('  canViewAllRequests:', canViewAllRequests);
+    
+    try {
+      await userPermissionsApi.upsert(permissionsUser.id, {
+        allowed_template_ids: templateIds,
+        can_create_requests: canCreateRequests,
+        can_view_all_requests: canViewAllRequests,
+      });
+      console.log('Permissions saved successfully');
+      toast.success('Permisos actualizados exitosamente');
+      setPermissionsUser(null);
+      // Reload users and refresh permissions map
+      await loadUsers();
+      // Refresh current user's permissions if editing own account
+      await refreshUser();
+    } catch (err: any) {
+      console.error('Error saving permissions:', err);
+      toast.error(err.message || 'Error al guardar permisos');
+    } finally {
+      setPermissionsSaving(false);
+    }
+  };
+
+  // Toggle template selection
+  const toggleTemplate = (templateId: string) => {
+    setAllowedTemplateIds(prev => {
+      if (prev.includes(templateId)) {
+        return prev.filter(id => id !== templateId);
+      } else {
+        return [...prev, templateId];
+      }
+    });
+  };
+
+  // Toggle all templates
+  const toggleAllTemplates = () => {
+    if (selectAllTemplates) {
+      // Currently all selected, switch to none (user will select specific ones)
+      setSelectAllTemplates(false);
+      setAllowedTemplateIds([]);
+    } else {
+      // Currently specific, switch to all
+      setSelectAllTemplates(true);
+      setAllowedTemplateIds([]);
     }
   };
 
@@ -197,9 +396,25 @@ export function UsersPage() {
                     </td>
                     <td className="px-6 py-4 text-sm text-on-surface-variant">{u.email}</td>
                     <td className="px-6 py-4">
-                      <span className={`text-[11px] font-bold px-3 py-1 rounded-full ${role.bg} ${role.color}`}>
-                        {role.label}
-                      </span>
+                      <div className="flex items-center gap-2">
+                        <span className={`text-[11px] font-bold px-3 py-1 rounded-full ${role.bg} ${role.color}`}>
+                          {role.label}
+                        </span>
+                        {u.role !== 'ADMIN' && (() => {
+                          const badge = getPermissionsBadge(u.id);
+                          if (!badge) return null;
+                          return (
+                            <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1 ${
+                              badge.variant === 'primary' 
+                                ? 'bg-tertiary/10 text-tertiary' 
+                                : 'bg-secondary-fixed text-secondary'
+                            }`} title="Plantillas permitidas">
+                              <FileSpreadsheet size={10} />
+                              {badge.label}
+                            </span>
+                          );
+                        })()}
+                      </div>
                     </td>
                     <td className="px-6 py-4 text-sm text-on-surface-variant">{u.institution?.name || '—'}</td>
                     <td className="px-6 py-4">
@@ -211,6 +426,13 @@ export function UsersPage() {
                     </td>
                     <td className="px-6 py-4 text-right">
                       <div className="flex items-center justify-end gap-1.5">
+                        {u.role !== 'ADMIN' && (
+                          <button onClick={() => openPermissionsModal(u)}
+                            className="btn-icon text-tertiary"
+                            title="Gestionar permisos">
+                            <Shield size={16} />
+                          </button>
+                        )}
                         <button onClick={() => { setResetPasswordUser(u); setNewPassword(''); }}
                           className="btn-icon text-warning-500"
                           title="Cambiar contraseña">
@@ -472,6 +694,197 @@ export function UsersPage() {
                     Actualizando...
                   </span>
                 ) : 'Actualizar contraseña'}
+              </button>
+            </div>
+          </div>
+        </div>,
+        document.body
+      ) : null}
+
+      {/* Permissions modal - full-screen on mobile */}
+      {permissionsUser && typeof document !== 'undefined' ? createPortal(
+        <div className="fixed inset-0 z-[1000] flex items-end md:items-center justify-center md:p-4 overflow-y-auto">
+          <div className="absolute inset-0 bg-black/20 backdrop-blur-sm" onClick={() => setPermissionsUser(null)} />
+          <div className="relative bg-white rounded-t-3xl md:rounded-2xl shadow-2xl w-full md:max-w-2xl max-h-[95vh] md:max-h-[90vh] animate-slide-up md:animate-scale-in border border-white/40 overflow-hidden">
+            {/* Top bar */}
+            <div className="sticky top-0 z-10 bg-white flex items-center justify-between px-4 md:px-8 py-5 border-b border-outline-variant/10">
+              <div className="flex items-center gap-4">
+                <div className="w-14 h-14 rounded-2xl bg-tertiary/10 flex items-center justify-center">
+                  <Shield size={28} className="text-tertiary" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-bold text-on-surface">Permisos de Acción</h3>
+                  <p className="text-sm text-on-surface-variant">{permissionsUser.first_name} {permissionsUser.last_name}</p>
+                </div>
+              </div>
+              <button onClick={() => setPermissionsUser(null)} className="w-10 h-10 flex items-center justify-center rounded-xl hover:bg-surface-container-high transition-colors">
+                <X size={22} className="text-on-surface-variant" />
+              </button>
+            </div>
+
+            {/* Content */}
+            <div className="px-4 md:px-8 py-6 md:py-8 overflow-y-auto max-h-[72vh]">
+              {permissionsLoading ? (
+                <div className="flex items-center justify-center py-12">
+                  <span className="w-8 h-8 border-3 border-primary/20 border-t-primary rounded-full animate-spin" />
+                </div>
+              ) : (
+                <div className="space-y-8">
+                  {/* Role indicator */}
+                  <div className="bg-surface-container-low/50 rounded-xl p-4 flex items-center gap-3">
+                    <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center">
+                      <UsersIcon size={20} className="text-primary" />
+                    </div>
+                    <div>
+                      <p className="text-sm font-bold text-on-surface">Rol: {roleConfig[permissionsUser.role]?.label || permissionsUser.role}</p>
+                      <p className="text-xs text-on-surface-variant">{permissionsUser.email}</p>
+                    </div>
+                  </div>
+
+                  {/* General permissions */}
+                  <div>
+                    <h4 className="text-sm font-bold text-on-surface mb-4 uppercase tracking-wider">Permisos Generales</h4>
+                    <div className="space-y-3">
+                      <label className="flex items-center gap-3 p-3 rounded-xl hover:bg-surface-container-low/30 cursor-pointer transition-colors">
+                        <div className="relative" onClick={(e) => { e.preventDefault(); setCanCreateRequests(!canCreateRequests); }}>
+                          <div className={`w-11 h-6 rounded-full transition-colors ${canCreateRequests ? 'bg-primary' : 'bg-surface-variant'}`} />
+                          <div className={`absolute left-0.5 top-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform ${canCreateRequests ? 'translate-x-5' : ''}`} />
+                        </div>
+                        <div>
+                          <p className="text-sm font-semibold text-on-surface">Crear solicitudes</p>
+                          <p className="text-xs text-on-surface-variant">Puede crear nuevas solicitudes de certificados</p>
+                        </div>
+                      </label>
+
+                      {permissionsUser.role === 'APPLICANT' && (
+                        <label className="flex items-center gap-3 p-3 rounded-xl hover:bg-surface-container-low/30 cursor-pointer transition-colors">
+                          <div className="relative" onClick={(e) => { e.preventDefault(); setCanViewAllRequests(!canViewAllRequests); }}>
+                            <div className={`w-11 h-6 rounded-full transition-colors ${canViewAllRequests ? 'bg-primary' : 'bg-surface-variant'}`} />
+                            <div className={`absolute left-0.5 top-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform ${canViewAllRequests ? 'translate-x-5' : ''}`} />
+                          </div>
+                          <div>
+                            <p className="text-sm font-semibold text-on-surface">Ver todas las solicitudes</p>
+                            <p className="text-xs text-on-surface-variant">Puede ver solicitudes de otros usuarios de su dependencia</p>
+                          </div>
+                        </label>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Template permissions */}
+                  <div>
+                    <div className="flex items-center justify-between mb-4">
+                      <h4 className="text-sm font-bold text-on-surface uppercase tracking-wider">Plantillas Permitidas</h4>
+                    </div>
+                    
+                    <p className="text-xs text-on-surface-variant mb-4">
+                      Selecciona los tipos de documentos que el usuario puede {permissionsUser.role === 'SIGNER' ? 'firmar' : 'solicitar'}. Si no seleccionas ninguna, el usuario podrá usar todas las plantillas disponibles.
+                    </p>
+
+                    {/* Toggle all */}
+                    <button
+                      onClick={toggleAllTemplates}
+                      className="w-full flex items-center justify-between p-4 rounded-xl border-2 transition-all mb-3"
+                      style={{
+                        borderColor: selectAllTemplates ? 'var(--md-sys-color-primary)' : 'var(--md-sys-color-outline-variant)',
+                        backgroundColor: selectAllTemplates ? 'var(--md-sys-color-primary-container)' : 'transparent'
+                      }}
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center">
+                          <FileSpreadsheet size={20} className="text-primary" />
+                        </div>
+                        <div className="text-left">
+                          <p className="text-sm font-bold text-on-surface">Todas las plantillas</p>
+                          <p className="text-xs text-on-surface-variant">Acceso completo a todos los tipos de documento</p>
+                        </div>
+                      </div>
+                      <div className="w-6 h-6 rounded-full border-2 flex items-center justify-center"
+                        style={{
+                          borderColor: selectAllTemplates ? 'var(--md-sys-color-primary)' : 'var(--md-sys-color-outline-variant)',
+                          backgroundColor: selectAllTemplates ? 'var(--md-sys-color-primary)' : 'transparent'
+                        }}>
+                        {selectAllTemplates && <Check size={14} className="text-white" />}
+                      </div>
+                    </button>
+
+                    {!selectAllTemplates && (
+                      <div className="space-y-2 max-h-[300px] overflow-y-auto pr-1">
+                        {templatesLoading ? (
+                          <div className="flex items-center justify-center py-8">
+                            <span className="w-6 h-6 border-2 border-primary/20 border-t-primary rounded-full animate-spin" />
+                          </div>
+                        ) : templates.length === 0 ? (
+                          <div className="text-center py-8 text-on-surface-variant">
+                            <FileSpreadsheet size={32} className="mx-auto mb-2 opacity-50" />
+                            <p className="text-sm">No hay plantillas disponibles</p>
+                          </div>
+                        ) : (
+                          templates.map((template) => {
+                            const isSelected = allowedTemplateIds.includes(template.id);
+                            return (
+                              <button
+                                key={template.id}
+                                onClick={() => toggleTemplate(template.id)}
+                                className="w-full flex items-center justify-between p-3 rounded-xl border transition-all hover:shadow-sm"
+                                style={{
+                                  borderColor: isSelected ? 'var(--md-sys-color-primary)' : 'var(--md-sys-color-outline-variant)',
+                                  backgroundColor: isSelected ? 'var(--md-sys-color-primary-container)' : 'transparent'
+                                }}
+                              >
+                                <div className="flex items-center gap-3">
+                                  <div className="w-9 h-9 rounded-lg bg-primary/10 flex items-center justify-center">
+                                    <span className="text-primary font-bold text-sm">{template.name?.charAt(0) || 'T'}</span>
+                                  </div>
+                                  <div className="text-left">
+                                    <p className="text-sm font-semibold text-on-surface">{template.name}</p>
+                                    <p className="text-xs text-on-surface-variant">
+                                      {template.code || 'Sin código'}{template.category ? ` · ${template.category}` : ''}
+                                    </p>
+                                  </div>
+                                </div>
+                                <div className="w-5 h-5 rounded-md border-2 flex items-center justify-center"
+                                  style={{
+                                    borderColor: isSelected ? 'var(--md-sys-color-primary)' : 'var(--md-sys-color-outline-variant)',
+                                    backgroundColor: isSelected ? 'var(--md-sys-color-primary)' : 'transparent'
+                                  }}>
+                                  {isSelected && <Check size={12} className="text-white" />}
+                                </div>
+                              </button>
+                            );
+                          })
+                        )}
+                      </div>
+                    )}
+
+                    {!selectAllTemplates && allowedTemplateIds.length > 0 && (
+                      <p className="text-xs text-on-surface-variant mt-3">
+                        {allowedTemplateIds.length} plantilla{allowedTemplateIds.length !== 1 ? 's' : ''} seleccionada{allowedTemplateIds.length !== 1 ? 's' : ''}
+                      </p>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Action buttons */}
+            <div className="flex items-center justify-end gap-3 px-4 md:px-8 py-4 border-t border-outline-variant/10 bg-surface-container-low/30">
+              <button onClick={() => setPermissionsUser(null)} className="btn-secondary text-sm px-5 py-2.5">
+                Cancelar
+              </button>
+              <button
+                onClick={handleSavePermissions}
+                disabled={permissionsSaving || permissionsLoading}
+                className="btn-primary text-sm px-6 py-2.5"
+              >
+                {permissionsSaving ? (
+                  <span className="flex items-center gap-2">
+                    <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                    Guardando...
+                  </span>
+                ) : (
+                  <><Check size={16} /> Guardar permisos</>
+                )}
               </button>
             </div>
           </div>

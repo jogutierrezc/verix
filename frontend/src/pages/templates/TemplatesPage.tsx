@@ -25,9 +25,23 @@ export function TemplatesPage() {
         .select('*, institution:institutions(name), dependency:dependencies(name)')
         .order('name');
 
-      // Admin sees all templates; signer sees their dependency's or general templates
-      if (user?.role === 'SIGNER') {
-        query = query.or(`dependency_id.eq.${user.dependency_id || 'nil'},dependency_id.is.null`);
+      // PRIORITY: If user has specific template permissions, use ONLY those IDs
+      if (user?.role !== 'ADMIN' && user?.permissions?.allowed_template_ids && user.permissions.allowed_template_ids.length > 0) {
+        // User has specific permissions - show ONLY those templates
+        query = query.in('id', user.permissions.allowed_template_ids);
+      } else {
+        // No specific permissions: apply role-based filters
+        if (user?.role === 'SIGNER') {
+          // Signers see their dependency's templates or general templates
+          query = query.or(`dependency_id.eq.${user.dependency_id || 'nil'},dependency_id.is.null`);
+        } else if (user?.role === 'APPLICANT') {
+          // Applicants see templates from their dependency
+          if (user?.dependency_id) {
+            query = query.eq('dependency_id', user.dependency_id);
+          } else if (user?.institution_id) {
+            query = query.eq('institution_id', user.institution_id);
+          }
+        }
       }
 
       const { data } = await query;

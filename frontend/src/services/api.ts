@@ -646,3 +646,92 @@ export const uploadApi = {
     if (error) throw error;
   },
 };
+
+// --- User Permissions API ---
+export const userPermissionsApi = {
+  /** Check if user_permissions table exists */
+  _tableExists: async (): Promise<boolean> => {
+    try {
+      const { error } = await supabase
+        .from('user_permissions')
+        .select('user_id')
+        .limit(1);
+      // If no error, table exists
+      return !error;
+    } catch {
+      return false;
+    }
+  },
+
+  /** Obtener permisos de un usuario */
+  getByUserId: async (userId: string) => {
+    const exists = await userPermissionsApi._tableExists();
+    if (!exists) return null;
+    
+    const { data, error } = await supabase
+      .from('user_permissions')
+      .select('*')
+      .eq('user_id', userId)
+      .maybeSingle();
+    if (error) throw error;
+    return data;
+  },
+
+  /** Guardar/actualizar permisos de un usuario */
+  upsert: async (userId: string, permissions: {
+    allowed_template_ids?: string[];
+    can_create_requests?: boolean;
+    can_view_all_requests?: boolean;
+  }) => {
+    const exists = await userPermissionsApi._tableExists();
+    if (!exists) {
+      throw new Error('La tabla user_permissions no existe. Ejecuta la migración SQL primero.');
+    }
+    
+    const { error } = await supabase.rpc('upsert_user_permissions', {
+      p_user_id: userId,
+      p_allowed_template_ids: permissions.allowed_template_ids || [],
+      p_can_create_requests: permissions.can_create_requests ?? true,
+      p_can_view_all_requests: permissions.can_view_all_requests ?? false,
+    });
+    if (error) throw error;
+  },
+
+  /** Eliminar permisos de un usuario */
+  delete: async (userId: string) => {
+    const exists = await userPermissionsApi._tableExists();
+    if (!exists) return;
+    
+    const { error } = await supabase.rpc('delete_user_permissions', {
+      p_user_id: userId,
+    });
+    if (error) throw error;
+  },
+
+  /** Verificar si un usuario puede usar una plantilla específica */
+  canUseTemplate: async (userId: string, templateId: string): Promise<boolean> => {
+    const exists = await userPermissionsApi._tableExists();
+    if (!exists) return true; // Default to allowed if table doesn't exist
+    
+    const { data, error } = await supabase.rpc('user_can_use_template', {
+      p_user_id: userId,
+      p_template_id: templateId,
+    });
+    if (error) throw error;
+    return data as boolean;
+  },
+
+  /** Obtener permisos del usuario actual */
+  getMyPermissions: async (userId: string) => {
+    const exists = await userPermissionsApi._tableExists();
+    if (!exists) {
+      return { allowed_template_ids: [], can_create_requests: true, can_view_all_requests: false };
+    }
+    
+    const { data, error } = await supabase.rpc('get_user_permissions', {
+      p_user_id: userId,
+    });
+    if (error) throw error;
+    return data?.[0] || { allowed_template_ids: [], can_create_requests: true, can_view_all_requests: false };
+  },
+};

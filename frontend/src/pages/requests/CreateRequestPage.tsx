@@ -2,40 +2,50 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../hooks/useAuth';
 import { supabase } from '../../lib/supabase';
-import { ArrowLeft, Save, FileText, Upload, Table, AlertCircle, CheckCircle, Download } from 'lucide-react';
-import { requestsApi } from '../../services/api';
+import {
+  ArrowLeft, Save, FileText, Upload, Table, AlertCircle, CheckCircle, Download,
+  FileBadge, GraduationCap, Award, ScrollText, ChevronRight, FileUp, CheckCircle2
+} from 'lucide-react';
+import { requestsApi, auditApi, getClientIP } from '../../services/api';
 import toast from 'react-hot-toast';
 import * as XLSX from 'xlsx';
 import { SkeletonCard } from '../../components/ui/SkeletonCard';
 
-/** Variables del sistema que se asignan automáticamente (no se muestran al usuario) */
 export const SYSTEM_VARS = new Set(['codigo', 'codigo_certificado', 'radicado', 'consecutivo']);
 
 type CreationType = 'single' | 'multiple';
+type StepView = 'TYPE_SELECTION' | 'TEMPLATE_SELECTION' | 'ACTION_AREA';
+
+const templateStyleMap: Record<string, { icon: any; color: string; bgColor: string; gradient: string }> = {
+  notas: { icon: FileBadge, color: 'text-blue-500', bgColor: 'bg-blue-50', gradient: 'from-blue-500/10 to-blue-600/5' },
+  constancia: { icon: GraduationCap, color: 'text-emerald-500', bgColor: 'bg-emerald-50', gradient: 'from-emerald-500/10 to-emerald-600/5' },
+  diploma: { icon: Award, color: 'text-amber-500', bgColor: 'bg-amber-50', gradient: 'from-amber-500/10 to-amber-600/5' },
+  acta: { icon: ScrollText, color: 'text-purple-500', bgColor: 'bg-purple-50', gradient: 'from-purple-500/10 to-purple-600/5' },
+  default: { icon: FileText, color: 'text-green-500', bgColor: 'bg-green-50', gradient: 'from-green-500/10 to-green-600/5' },
+};
+
+const getTemplateStyle = (category: string | null) => {
+  if (!category) return templateStyleMap.default;
+  const key = category.toLowerCase();
+  for (const [k, v] of Object.entries(templateStyleMap)) {
+    if (key.includes(k)) return v;
+  }
+  return templateStyleMap.default;
+};
 
 export const extractTemplateVariables = (template: any): string[] => {
   if (template?.config && Array.isArray(template.config.elements)) {
     const regex = /{{\s*([^}\s]+)\s*}}/g;
     const vars = new Set<string>();
-
     template.config.elements.forEach((el: any) => {
       if (typeof el.content === 'string') {
         let match: RegExpExecArray | null;
-        while ((match = regex.exec(el.content)) !== null) {
-          vars.add(match[1]);
-        }
+        while ((match = regex.exec(el.content)) !== null) vars.add(match[1]);
       }
     });
-
-    if (vars.size > 0) {
-      return Array.from(vars);
-    }
+    if (vars.size > 0) return Array.from(vars);
   }
-
-  if (template?.variables && Array.isArray(template.variables)) {
-    return template.variables;
-  }
-
+  if (template?.variables && Array.isArray(template.variables)) return template.variables;
   return [];
 };
 
@@ -49,27 +59,26 @@ export function CreateRequestPage() {
   const isEditMode = Boolean(editId);
   const isReuseMode = Boolean(reuseId && !editId);
 
-  // ── State for reuse mode: show original rejection info ──
-  const [originalRejectedId, setOriginalRejectedId] = useState<string | null>(null);
-  const [originalRejectionReason, setOriginalRejectionReason] = useState<string | null>(null);
+  // Step view state with transition tracking
+  const [currentView, setCurrentView] = useState<StepView>('TYPE_SELECTION');
+  const [viewTransition, setViewTransition] = useState<'entering' | 'leaving' | 'idle'>('idle');
+  const [requestType, setRequestType] = useState<CreationType | null>(null);
+  const [selectedTemplate, setSelectedTemplate] = useState<any>(null);
 
-  // Step 1: choose single or multiple
-  const [creationType, setCreationType] = useState<CreationType | null>(null);
-
-  // Templates
+  // Templates from database
   const [templates, setTemplates] = useState<any[]>([]);
-  const [selectedTemplate, setSelectedTemplate] = useState('');
-  const [templateVars, setTemplateVars] = useState<string[]>([]);
-  const [filteredVars, setFilteredVars] = useState<string[]>([]);
   const [loadingTemplates, setLoadingTemplates] = useState(true);
 
-  // Individual form
+  // Template variables & form
+  const [filteredVars, setFilteredVars] = useState<string[]>([]);
   const [formData, setFormData] = useState<Record<string, string>>({});
   const [savingIndividual, setSavingIndividual] = useState(false);
 
   // Edit mode
   const [originalRequestId, setOriginalRequestId] = useState<string | null>(null);
   const [originalBatchId, setOriginalBatchId] = useState<string | null>(null);
+  const [originalRejectedId, setOriginalRejectedId] = useState<string | null>(null);
+  const [originalRejectionReason, setOriginalRejectionReason] = useState<string | null>(null);
 
   // Massive import
   const [excelData, setExcelData] = useState<Record<string, string>[]>([]);
@@ -78,250 +87,124 @@ export function CreateRequestPage() {
   const [importing, setImporting] = useState(false);
   const [importProgress, setImportProgress] = useState({ current: 0, total: 0 });
 
-  useEffect(() => {
-    if (!user) return;
-    loadTemplates();
-  }, [user]);
-
-  // ── Reuse mode: load rejected request data ──
-  useEffect(() => {
-    if (!reuseId || !user || editId) return;
-    loadRejectedData();
-  }, [reuseId, user, editId]);
-
-  const loadRejectedData = async () => {
-    try {
-      const { data, error } = await supabase
-        .from('certificate_requests')
-        .select('*, template:templates(name)')
-        .eq('id', reuseId)
-        .single();
-
-      if (error) throw error;
-      if (!data) { toast.error('Solicitud no encontrada'); navigate('/requests'); return; }
-
-      // Verify ownership
-      if (data.user_id !== user?.id) {
-        toast.error('No tienes permiso para reutilizar esta solicitud');
-        navigate('/requests');
-        return;
-      }
-
-      // Auto-select single mode
-      setCreationType('single');
-
-      // Pre-fill form data (but NOT template - user selects new one)
-      if (data.data && typeof data.data === 'object') {
-        setFormData(data.data as Record<string, string>);
-      }
-
-      setOriginalRejectedId(reuseId);
-      setOriginalRejectionReason(data.rejection_reason);
-
-      toast.success('Datos de solicitud rechazada cargados. Selecciona una plantilla y corrige los datos.');
-    } catch (err: any) {
-      console.error('Error loading rejected request:', err);
-      toast.error('Error al cargar los datos de la solicitud');
-      navigate('/requests');
-    }
-  };
-
-  // ── Edit mode: load existing request ──
-  useEffect(() => {
-    if (!editId || !user) return;
-    loadExistingRequest();
-  }, [editId, user]);
-
-  const loadExistingRequest = async () => {
-    try {
-      const { data, error } = await supabase
-        .from('certificate_requests')
-        .select('*')
-        .eq('id', editId)
-        .single();
-
-      if (error) throw error;
-      if (!data) { toast.error('Solicitud no encontrada'); navigate('/requests'); return; }
-
-      // Verify ownership
-      if (data.user_id !== user?.id) {
-        toast.error('No tienes permiso para editar esta solicitud');
-        navigate('/requests');
-        return;
-      }
-
-      // Verify editable status
-      const editableStatuses = ['DRAFT', 'PENDING', 'IN_REVIEW', 'REJECTED'];
-      if (!editableStatuses.includes(data.status)) {
-        toast.error('Esta solicitud ya no puede ser editada');
-        navigate('/requests');
-        return;
-      }
-
-      // Set type based on the request
-      if (data.type === 'MASSIVE' || data.batch_id) {
-        setCreationType('multiple');
-      } else {
-        setCreationType('single');
-      }
-
-      // Set template
-      setSelectedTemplate(data.template_id);
-
-      // Pre-fill form data
-      if (data.data && typeof data.data === 'object') {
-        const rawData = data.data as Record<string, string>;
-        setFormData(rawData);
-      }
-
-      // Store original data for reference
-      setOriginalRequestId(editId!);
-      if (data.batch_id) setOriginalBatchId(data.batch_id);
-    } catch (err: any) {
-      console.error('Error loading request for edit:', err);
-      toast.error('Error al cargar la solicitud');
-      navigate('/requests');
-    }
-  };
+  // ── Load templates ──
+  useEffect(() => { if (user) loadTemplates(); }, [user]);
+  useEffect(() => { if (reuseId && user && !editId) loadRejectedData(); }, [reuseId, user, editId]);
+  useEffect(() => { if (editId && user) loadExistingRequest(); }, [editId, user]);
 
   const loadTemplates = async () => {
     setLoadingTemplates(true);
     try {
-      // Only show templates assigned to the user's dependency
-      if (!user?.dependency_id) {
-        setTemplates([]);
-        return;
+      let query = supabase.from('templates').select('id, name, code, description, variables, category, config').eq('is_active', true);
+      if (user?.role !== 'ADMIN' && user?.permissions?.allowed_template_ids && user.permissions.allowed_template_ids.length > 0) {
+        query = query.in('id', user.permissions.allowed_template_ids);
+      } else if (user?.dependency_id) {
+        query = query.eq('dependency_id', user.dependency_id);
+      } else if (user?.institution_id && user?.role !== 'ADMIN') {
+        query = query.eq('institution_id', user.institution_id);
       }
-
-      const { data } = await supabase
-        .from('templates')
-        .select('id, name, code, description, variables, category, config')
-        .eq('is_active', true)
-        .eq('dependency_id', user.dependency_id)
-        .order('name');
-
+      const { data } = await query.order('name');
       setTemplates(data || []);
-    } catch (err) {
-      console.error('Error loading templates:', err);
-    } finally {
-      setLoadingTemplates(false);
+    } catch (err) { console.error('Error loading templates:', err); }
+    finally { setLoadingTemplates(false); }
+  };
+
+  const loadRejectedData = async () => {
+    try {
+      const { data, error } = await supabase.from('certificate_requests').select('*, template:templates(name)').eq('id', reuseId).single();
+      if (error) throw error;
+      if (!data) { toast.error('Solicitud no encontrada'); navigate('/requests'); return; }
+      if (data.user_id !== user?.id) { toast.error('No tienes permiso'); navigate('/requests'); return; }
+      setOriginalRejectedId(reuseId);
+      setOriginalRejectionReason(data.rejection_reason);
+      if (data.data && typeof data.data === 'object') setFormData(data.data as Record<string, string>);
+      const template = templates.find(t => t.id === data.template_id);
+      if (template) { setSelectedTemplate(template); handleTemplateSelect(template, false); }
+      setCurrentView('ACTION_AREA');
+      setRequestType(data.type === 'MASSIVE' || data.batch_id ? 'multiple' : 'single');
+    } catch (err: any) { toast.error('Error al cargar datos'); navigate('/requests'); }
+  };
+
+  const loadExistingRequest = async () => {
+    try {
+      const { data, error } = await supabase.from('certificate_requests').select('*').eq('id', editId).single();
+      if (error) throw error;
+      if (!data) { toast.error('Solicitud no encontrada'); navigate('/requests'); return; }
+      if (data.user_id !== user?.id) { toast.error('No tienes permiso'); navigate('/requests'); return; }
+      const editableStatuses = ['DRAFT', 'PENDING', 'IN_REVIEW', 'REJECTED'];
+      if (!editableStatuses.includes(data.status)) { toast.error('No puede editarse'); navigate('/requests'); return; }
+      setRequestType(data.type === 'MASSIVE' || data.batch_id ? 'multiple' : 'single');
+      const template = templates.find(t => t.id === data.template_id);
+      if (template) { setSelectedTemplate(template); handleTemplateSelect(template, false); }
+      if (data.data && typeof data.data === 'object') setFormData(data.data as Record<string, string>);
+      setOriginalRequestId(editId!);
+      if (data.batch_id) setOriginalBatchId(data.batch_id);
+      setCurrentView('ACTION_AREA');
+    } catch (err: any) { toast.error('Error al cargar solicitud'); navigate('/requests'); }
+  };
+
+  // ── Navigation with transitions ──
+  const navigateToView = (view: StepView) => {
+    setViewTransition('leaving');
+    setTimeout(() => {
+      setCurrentView(view);
+      setViewTransition('entering');
+      setTimeout(() => setViewTransition('idle'), 300);
+    }, 200);
+  };
+
+  const handleBack = () => {
+    if (currentView === 'ACTION_AREA') navigateToView('TEMPLATE_SELECTION');
+    else if (currentView === 'TEMPLATE_SELECTION') { setRequestType(null); setSelectedTemplate(null); navigateToView('TYPE_SELECTION'); }
+  };
+
+  const handleTypeSelect = (type: CreationType) => {
+    setRequestType(type);
+    navigateToView('TEMPLATE_SELECTION');
+  };
+
+  const handleTemplateSelect = (template: any, resetForm = true) => {
+    setSelectedTemplate(template);
+    const vars = extractTemplateVariables(template);
+    const visible = vars.filter((v: string) => !SYSTEM_VARS.has(v));
+    setFilteredVars(visible);
+    if (resetForm) {
+      const initial: Record<string, string> = {};
+      visible.forEach((v: string) => { initial[v] = ''; });
+      setFormData(initial);
+      setExcelData([]); setExcelColumns([]); setColumnMapping({});
     }
   };
 
-  const handleTemplateChange = useCallback((templateId: string) => {
-    // In edit mode, don't reset form data if template is the same
-    if (isEditMode && templateId === selectedTemplate) return;
+  const handleContinueToForm = () => {
+    if (!selectedTemplate) return;
+    navigateToView('ACTION_AREA');
+  };
 
-    setSelectedTemplate(templateId);
-
-    // Only reset form if not in edit/reuse mode or if template changed
-    if ((!isEditMode && !isReuseMode) || templateId !== selectedTemplate) {
-      setFormData({});
-    }
-    setExcelData([]);
-    setExcelColumns([]);
-    setColumnMapping({});
-
-    const template = templates.find(t => t.id === templateId);
-    if (template) {
-      const vars = extractTemplateVariables(template);
-      setTemplateVars(vars);
-
-      // Filter out system variables from the form
-      const visible = vars.filter((v: string) => !SYSTEM_VARS.has(v));
-      setFilteredVars(visible);
-
-      // In edit/reuse mode, don't reset formData — it's already loaded
-      if (!isEditMode && !isReuseMode) {
-        const initial: Record<string, string> = {};
-        visible.forEach((v: string) => { initial[v] = ''; });
-        setFormData(initial);
-      }
-
-      // Auto-map columns if coming from Excel
-      if (creationType === 'multiple') {
-        const mapping: Record<string, string> = {};
-        excelColumns.forEach(col => {
-          const match = visible.find(
-            (v: string) => v.toLowerCase() === col.toLowerCase().replace(/\s+/g, '_')
-          );
-          if (match) mapping[col] = match;
-        });
-        setColumnMapping(mapping);
-      }
-    } else {
-      setTemplateVars([]);
-      setFilteredVars([]);
-    }
-  }, [templates, creationType, excelColumns, isEditMode, selectedTemplate]);
-
-  // --- Individual submit (create or update) ---
+  // ── Submit ──
   const handleIndividualSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedTemplate) {
-      toast.error('Selecciona una plantilla');
-      return;
-    }
-
+    if (!selectedTemplate) { toast.error('Selecciona una plantilla'); return; }
     setSavingIndividual(true);
     try {
-      const dataToSend = Object.fromEntries(
-        Object.entries(formData).filter(([_key, value]) => value !== ''),
-      );
-
+      const dataToSend = Object.fromEntries(Object.entries(formData).filter(([, v]) => v !== ''));
       if (isEditMode && originalRequestId) {
-        // ── Update existing request ──
-        await requestsApi.update(originalRequestId, {
-          template_id: selectedTemplate,
-          data: dataToSend,
-        });
-
-        // Audit log
-        try {
-          const { auditApi, getClientIP } = await import('../../services/api');
-          const ip = await getClientIP();
-          await auditApi.log({
-            user_id: user?.id,
-            user_email: user?.email,
-            module: 'requests',
-            action: 'update',
-            entity_id: originalRequestId,
-            entity_type: 'certificate_request',
-            ip_address: ip,
-            description: 'Solicitud editada por el solicitante',
-          });
-        } catch { /* silent */ }
-
-        toast.success('Solicitud actualizada exitosamente');
+        await requestsApi.update(originalRequestId, { template_id: selectedTemplate.id, data: dataToSend });
+        try { const ip = await getClientIP(); await auditApi.log({ user_id: user?.id, user_email: user?.email, module: 'requests', action: 'update', entity_id: originalRequestId, entity_type: 'certificate_request', ip_address: ip, description: 'Solicitud editada' }); } catch {}
+        toast.success('Solicitud actualizada');
       } else {
-        // ── Create new request ──
         const code = `REQ-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).substring(2, 6).toUpperCase()}`;
-
-        await requestsApi.create({
-          code,
-          type: 'INDIVIDUAL',
-          status: 'PENDING',
-          user_id: user?.id,
-          template_id: selectedTemplate,
-          data: dataToSend,
-        });
-
+        await requestsApi.create({ code, type: 'INDIVIDUAL', status: 'PENDING', user_id: user?.id, template_id: selectedTemplate.id, data: dataToSend });
         toast.success('Solicitud creada exitosamente');
       }
-
       navigate('/requests');
-    } catch (err: any) {
-      toast.error(err.message || 'Error al guardar la solicitud');
-    } finally {
-      setSavingIndividual(false);
-    }
+    } catch (err: any) { toast.error(err.message || 'Error al guardar'); }
+    finally { setSavingIndividual(false); }
   };
 
-  // --- Excel handling ---
   const handleFileUpload = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-
     const reader = new FileReader();
     reader.onload = (evt) => {
       try {
@@ -329,728 +212,341 @@ export function CreateRequestPage() {
         const workbook = XLSX.read(data, { type: 'array', cellDates: true });
         const sheet = workbook.Sheets[workbook.SheetNames[0]];
         const json = XLSX.utils.sheet_to_json<Record<string, string>>(sheet, { raw: false, defval: '' });
-
-        if (json.length === 0) {
-          toast.error('El archivo Excel está vacío');
-          return;
-        }
-
+        if (json.length === 0) { toast.error('Archivo vacío'); return; }
         const columns = Object.keys(json[0]);
-        setExcelColumns(columns);
-        setExcelData(json);
-
-        // Auto-map to filtered template variables if a template is selected
-        if (selectedTemplate) {
+        setExcelColumns(columns); setExcelData(json);
+        if (filteredVars.length > 0) {
           const mapping: Record<string, string> = {};
-          columns.forEach(col => {
-            const match = filteredVars.find(
-              v => v.toLowerCase() === col.toLowerCase().replace(/\s+/g, '_')
-            );
-            if (match) mapping[col] = match;
-          });
+          columns.forEach(col => { const match = filteredVars.find(v => v.toLowerCase() === col.toLowerCase().replace(/\s+/g, '_')); if (match) mapping[col] = match; });
           setColumnMapping(mapping);
         }
-
-        toast.success(`Se cargaron ${json.length} filas desde el Excel`);
-      } catch (err) {
-        toast.error('Error al leer el archivo Excel');
-        console.error(err);
-      }
+        toast.success(`${json.length} filas cargadas`);
+      } catch { toast.error('Error al leer archivo'); }
     };
     reader.readAsArrayBuffer(file);
-  }, [selectedTemplate, filteredVars]);
+  }, [filteredVars]);
 
   const handleImportMassive = async () => {
-    if (!selectedTemplate) {
-      toast.error('Selecciona una plantilla');
-      return;
-    }
-    if (excelData.length === 0) {
-      toast.error('No hay datos para importar');
-      return;
-    }
-
-    setImporting(true);
-    setImportProgress({ current: 0, total: excelData.length });
-
+    if (!selectedTemplate || excelData.length === 0) { toast.error('Selecciona plantilla y datos'); return; }
+    setImporting(true); setImportProgress({ current: 0, total: excelData.length });
     if (isEditMode && originalRequestId) {
-      // ── Edit mode: find the batch and update all items ──
       try {
-        // Load the original request to get batch_id
-        const { data: originalReq } = await supabase
-          .from('certificate_requests')
-          .select('batch_id')
-          .eq('id', originalRequestId)
-          .single();
-
-        if (!originalReq?.batch_id) {
-          toast.error('No se encontró el lote original');
-          setImporting(false);
-          return;
-        }
-
+        const { data: originalReq } = await supabase.from('certificate_requests').select('batch_id').eq('id', originalRequestId).single();
+        if (!originalReq?.batch_id) { toast.error('Lote no encontrado'); setImporting(false); return; }
         const batchId = originalReq.batch_id;
-
-        // Get all existing requests in this batch
-        const { data: existingBatch } = await supabase
-          .from('certificate_requests')
-          .select('id, row_index, code')
-          .eq('batch_id', batchId)
-          .order('row_index', { ascending: true });
-
-        if (!existingBatch || existingBatch.length === 0) {
-          toast.error('No se encontraron solicitudes en el lote');
-          setImporting(false);
-          return;
-        }
-
+        const { data: existingBatch } = await supabase.from('certificate_requests').select('id, row_index').eq('batch_id', batchId).order('row_index');
+        if (!existingBatch) { setImporting(false); return; }
         let updatedCount = 0;
         for (let i = 0; i < Math.min(excelData.length, existingBatch.length); i++) {
-          const row = excelData[i];
-          const existingReq = existingBatch[i];
-
           const mappedData: Record<string, string> = {};
-          Object.entries(columnMapping).forEach(([excelCol, templateVar]) => {
-            if (!templateVar) return;
-            const value = row[excelCol];
-            if (value !== undefined && value !== null && String(value).trim() !== '') {
-              mappedData[templateVar] = String(value);
-            }
-          });
-
-          const { error: updateError } = await supabase
-            .from('certificate_requests')
-            .update({ data: mappedData })
-            .eq('id', existingReq.id);
-
-          if (!updateError) updatedCount++;
+          Object.entries(columnMapping).forEach(([excelCol, templateVar]) => { if (!templateVar) return; const value = excelData[i][excelCol]; if (value !== undefined && String(value).trim() !== '') mappedData[templateVar] = String(value); });
+          const { error } = await supabase.from('certificate_requests').update({ data: mappedData }).eq('id', existingBatch[i].id);
+          if (!error) updatedCount++;
           setImportProgress({ current: i + 1, total: existingBatch.length });
         }
-
-        // If there are more rows than existing items, add new ones
-        if (excelData.length > existingBatch.length) {
-          const newRows = [];
-          for (let i = existingBatch.length; i < excelData.length; i++) {
-            const row = excelData[i];
-            const mappedData: Record<string, string> = {};
-            Object.entries(columnMapping).forEach(([excelCol, templateVar]) => {
-              if (!templateVar) return;
-              const value = row[excelCol];
-              if (value !== undefined && value !== null && String(value).trim() !== '') {
-                mappedData[templateVar] = String(value);
-              }
-            });
-
-            const code = `MAS-${batchId.substring(0, 6).toUpperCase()}-${String(i + 1).padStart(4, '0')}`;
-            newRows.push({
-              code,
-              type: 'MASSIVE',
-              status: 'PENDING',
-              user_id: user?.id,
-              template_id: selectedTemplate,
-              data: mappedData,
-              batch_id: batchId,
-              batch_total: Math.max(excelData.length, existingBatch.length),
-              row_index: i,
-            });
-          }
-
-          if (newRows.length > 0) {
-            const { error: insertError } = await supabase.from('certificate_requests').insert(newRows);
-            if (insertError) throw insertError;
-
-            // Update batch_total on all items
-            const newTotal = Math.max(excelData.length, existingBatch.length);
-            await supabase
-              .from('certificate_requests')
-              .update({ batch_total: newTotal })
-              .eq('batch_id', batchId);
-          }
-        }
-
-        // Audit log
-        try {
-          const { auditApi, getClientIP } = await import('../../services/api');
-          const ip = await getClientIP();
-          await auditApi.log({
-            user_id: user?.id,
-            user_email: user?.email,
-            module: 'requests',
-            action: 'batch_update',
-            entity_id: batchId,
-            entity_type: 'certificate_request_batch',
-            ip_address: ip,
-            description: `Lote editado masivamente por el solicitante (${updatedCount} actualizadas)`,
-          });
-        } catch { /* silent */ }
-
-        toast.success(`✅ ${updatedCount} solicitudes actualizadas exitosamente`);
+        toast.success(`${updatedCount} solicitudes actualizadas`);
         navigate('/requests');
-      } catch (err: any) {
-        toast.error(`Error al actualizar lote: ${err.message || 'Error desconocido'}`);
-        console.error('Batch update error:', err);
-        setImporting(false);
-      }
+      } catch (err: any) { toast.error('Error: ' + err.message); setImporting(false); }
     } else {
-      // ── Create new batch ──
       const batchId = crypto.randomUUID();
-      const sourceFileName = fileInputRef.current?.files?.[0]?.name || null;
-
       const allRows = excelData.map((row, i) => {
         const mappedData: Record<string, string> = {};
-        Object.entries(columnMapping).forEach(([excelCol, templateVar]) => {
-          if (!templateVar) return;
-          const value = row[excelCol];
-          if (value !== undefined && value !== null && String(value).trim() !== '') {
-            mappedData[templateVar] = String(value);
-          }
-        });
-
-        const code = `MAS-${batchId.substring(0, 6).toUpperCase()}-${String(i + 1).padStart(4, '0')}`;
-
-        return {
-          code,
-          type: 'MASSIVE',
-          status: 'PENDING',
-          user_id: user?.id,
-          template_id: selectedTemplate,
-          data: mappedData,
-          batch_id: batchId,
-          batch_total: excelData.length,
-          row_index: i,
-          source_file: sourceFileName,
-          original_data: row,
-        };
+        Object.entries(columnMapping).forEach(([excelCol, templateVar]) => { if (!templateVar) return; const value = row[excelCol]; if (value !== undefined && String(value).trim() !== '') mappedData[templateVar] = String(value); });
+        return { code: `MAS-${batchId.substring(0, 6).toUpperCase()}-${String(i + 1).padStart(4, '0')}`, type: 'MASSIVE', status: 'PENDING', user_id: user?.id, template_id: selectedTemplate.id, data: mappedData, batch_id: batchId, batch_total: excelData.length, row_index: i, original_data: row };
       });
-
-      try {
-        const { error } = await supabase.from('certificate_requests').insert(allRows);
-        if (error) throw error;
-
-        setImportProgress({ current: excelData.length, total: excelData.length });
-        toast.success(`✅ ${allRows.length} solicitudes creadas exitosamente`);
-        navigate('/requests');
-      } catch (err: any) {
-        toast.error(`Error al importar: ${err.message || 'Error desconocido'}`);
-        console.error('Import error:', err);
-        setImporting(false);
-      }
+      try { await supabase.from('certificate_requests').insert(allRows); toast.success(`${allRows.length} solicitudes creadas`); navigate('/requests'); }
+      catch (err: any) { toast.error('Error: ' + err.message); setImporting(false); }
     }
   };
 
   const downloadTemplate = () => {
     if (!filteredVars.length || !selectedTemplate) return;
-
-    const template = templates.find(t => t.id === selectedTemplate);
-    const templateName = template?.name || 'certificado';
-    const safeName = templateName.toLowerCase().replace(/[^a-z0-9áéíóúñ\s]/gi, '').replace(/\s+/g, '_').substring(0, 40);
-
-    // Generate example values based on variable name
-    const getExample = (v: string): string => {
-      const lower = v.toLowerCase();
-      if (lower.includes('nombre')) return 'Ej: Juan Pérez';
-      if (lower.includes('documento') || lower.includes('cedula') || lower.includes('identificacion') || lower.includes('id')) return 'Ej: 1234567890';
-      if (lower.includes('email') || lower.includes('correo') || lower.includes('mail')) return 'ejemplo@correo.com';
-      if (lower.includes('telefono') || lower.includes('celular') || lower.includes('teléfono')) return 'Ej: 3001234567';
-      if (lower.includes('fecha') || lower.includes('date')) return '20/06/2026';
-      if (lower.includes('curso') || lower.includes('programa') || lower.includes('carrera')) return 'Ej: Administración de Empresas';
-      if (lower.includes('codigo') || lower.includes('matricula')) return 'Ej: 2024-001';
-      if (lower.includes('direccion') || lower.includes('dirección')) return 'Ej: Cra 1 # 2-3';
-      if (lower.includes('ciudad') || lower.includes('municipio')) return 'Ej: Valledupar';
-      if (lower.includes('horas') || lower.includes('duracion') || lower.includes('duración')) return 'Ej: 120';
-      if (lower.includes('nota') || lower.includes('calificacion') || lower.includes('promedio')) return 'Ej: 4.5';
-      if (lower.includes('semestre') || lower.includes('periodo') || lower.includes('año')) return 'Ej: 2026-1';
-      return `Ej: ${v.replace(/_/g, ' ')}`;
-    };
-
-    // Create example row
-    const exampleRow: Record<string, string> = {};
-    filteredVars.forEach(v => {
-      exampleRow[v] = getExample(v);
-    });
-
-    const ws = XLSX.utils.json_to_sheet([exampleRow, {}]);
-
-    // Set column widths for readability
-    ws['!cols'] = filteredVars.map(v => ({ wch: Math.max(v.replace(/_/g, ' ').length + 5, 22) }));
-
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Datos');
-
-    // Add instructions sheet
-    const instructionsWs = XLSX.utils.aoa_to_sheet([
-      ['INSTRUCCIONES - IMPORTACIÓN DE CERTIFICADOS'],
-      [''],
-      ['1. Esta plantilla contiene los campos necesarios para generar los certificados.'],
-      ['2. La primera fila ("Ej: ...") contiene datos de ejemplo — reemplázalos con los datos reales.'],
-      ['3. La segunda fila está vacía — ahí puedes empezar a escribir tus datos.'],
-      ['4. Cada fila del archivo generará UNA solicitud de certificado independiente.'],
-      ['5. No modifiques los encabezados de columna (primera fila).'],
-      ['6. Los campos: código, radicado y consecutivo se asignan automáticamente.'],
-      ['7. Guarda el archivo y súbelo en la página de importación.'],
-      [''],
-      ['Columnas disponibles:'],
-      ...filteredVars.map(v => [`  • ${v.replace(/_/g, ' ')}`]),
-      [''],
-      ['Sistema de Certificación - VERIX'],
-    ]);
-    instructionsWs['!cols'] = [{ wch: 70 }];
-    XLSX.utils.book_append_sheet(wb, instructionsWs, 'Instrucciones');
-
+    const safeName = selectedTemplate.name.toLowerCase().replace(/[^a-z0-9áéíóúñ\s]/gi, '').replace(/\s+/g, '_').substring(0, 40);
+    const getExample = (v: string): string => { const lower = v.toLowerCase(); if (lower.includes('nombre')) return 'Ej: Juan Pérez'; if (lower.includes('documento') || lower.includes('cedula')) return 'Ej: 1234567890'; if (lower.includes('fecha')) return '20/06/2026'; return `Ej: ${v.replace(/_/g, ' ')}`; };
+    const exampleRow: Record<string, string> = {}; filteredVars.forEach(v => { exampleRow[v] = getExample(v); });
+    const ws = XLSX.utils.json_to_sheet([exampleRow]); ws['!cols'] = filteredVars.map(v => ({ wch: Math.max(v.replace(/_/g, ' ').length + 5, 22) }));
+    const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'Datos');
     XLSX.writeFile(wb, `${safeName}.xlsx`);
   };
 
+  // ── Animation helper classes ──
+  const viewTransitionClass = viewTransition === 'entering' ? 'animate-fade-in' : viewTransition === 'leaving' ? 'opacity-0 -translate-y-2' : '';
+  const staggerClass = (i: number) => `opacity-0 animate-[slideUp_0.4s_ease-out_forwards]` + ` [animation-delay:${80 + i * 60}ms]`;
+
   if (loadingTemplates) {
-    return (
-      <div className="max-w-3xl mx-auto space-y-6 animate-fade-in">
-        <SkeletonCard variant="form" count={1} className="max-w-3xl" />
-      </div>
-    );
+    return <div className="max-w-4xl mx-auto px-4 md:px-6"><SkeletonCard variant="form" count={1} /></div>;
   }
 
-  return (
-    <div className="max-w-4xl mx-auto space-y-6 animate-fade-in">
-      {/* Header */}
-      <div className="flex items-center gap-4">
-        <button onClick={() => navigate('/requests')} className="btn-icon text-on-surface-variant hover:bg-surface-container-high rounded-xl p-2">
-          <ArrowLeft size={22} />
+  // ── TYPE SELECTION ──
+  const renderTypeSelection = () => (
+    <div className="max-w-4xl mx-auto space-y-8">
+      <div className="space-y-1">
+        <h1 className="text-3xl md:text-[42px] font-bold text-slate-800 tracking-tight leading-tight">Nueva solicitud</h1>
+        <p className="text-gray-500 text-base md:text-lg">Solicita la emisión de certificados</p>
+      </div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-5 md:gap-6">
+        {[{ type: 'single' as const, icon: FileText, title: 'Solicitud única', desc: 'Crea una solicitud de certificado llenando el formulario manualmente. Ideal para casos individuales o pruebas rápidas.' },
+          { type: 'multiple' as const, icon: Upload, title: 'Múltiples solicitudes', desc: 'Importa un archivo Excel con los datos de varios certificados. Cada fila generará una solicitud independiente.' }
+        ].map((item, i) => (
+          <div key={item.type} onClick={() => handleTypeSelect(item.type)}
+            className={`${staggerClass(i)} bg-white p-6 md:p-8 rounded-3xl border-2 border-transparent hover:border-green-500 hover:shadow-xl active:scale-[0.98] transition-all duration-300 cursor-pointer group shadow-sm`}>
+            <div className="w-12 h-12 md:w-14 md:h-14 bg-green-50 rounded-2xl flex items-center justify-center mb-5 md:mb-6 group-hover:scale-110 group-hover:bg-green-100 transition-all duration-300">
+              <item.icon className="w-6 h-6 md:w-7 md:h-7 text-green-600" />
+            </div>
+            <h3 className="text-lg md:text-xl font-bold text-slate-800 mb-2">{item.title}</h3>
+            <p className="text-gray-500 leading-relaxed text-sm md:text-base">{item.desc}</p>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+
+  // ── TEMPLATE SELECTION ──
+  const renderTemplateSelection = () => (
+    <div className="max-w-4xl mx-auto space-y-6 md:space-y-8">
+      <div className="space-y-1">
+        <button onClick={handleBack} className="flex items-center gap-2 text-sm text-gray-500 hover:text-gray-800 transition-colors mb-3 md:mb-4 group -ml-1">
+          <ArrowLeft className="w-4 h-4 group-hover:-translate-x-1 transition-transform duration-200" />
+          <span className="group-hover:underline">Volver</span>
         </button>
+        <h1 className="text-3xl md:text-[42px] font-bold text-slate-800 tracking-tight">Seleccionar plantilla</h1>
+        <p className="text-gray-500 text-base md:text-lg">Elige el tipo de documento que deseas solicitar</p>
+      </div>
+
+      <div className="bg-white p-5 md:p-8 rounded-3xl shadow-sm border border-gray-100">
+        <div className="mb-5 md:mb-6 flex items-center gap-3">
+          <div className="p-2 bg-green-50 rounded-xl"><FileText className="w-5 h-5 text-green-600" /></div>
+          <div>
+            <h2 className="text-base md:text-lg font-bold text-slate-800">Tipos de documento</h2>
+            <p className="text-xs md:text-sm text-gray-500">{templates.length} plantilla{templates.length !== 1 ? 's' : ''} disponible{templates.length !== 1 ? 's' : ''}</p>
+          </div>
+        </div>
+
+        {templates.length === 0 ? (
+          <div className="text-center py-10 md:py-16">
+            <div className="w-16 h-16 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-4"><FileText size={32} className="text-gray-300" /></div>
+            <p className="text-lg font-semibold text-gray-500 mb-1">No hay plantillas disponibles</p>
+            <p className="text-sm text-gray-400">Contacta al administrador para asignar plantillas</p>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 md:gap-4">
+            {templates.map((template, i) => {
+              const style = getTemplateStyle(template.category);
+              const Icon = style.icon;
+              const isSelected = selectedTemplate?.id === template.id;
+              return (
+                <div key={template.id} onClick={() => handleTemplateSelect(template)}
+                  className={`${staggerClass(i)} relative p-4 md:p-5 rounded-2xl cursor-pointer transition-all duration-300 border-2 text-left active:scale-[0.97] ${isSelected ? 'border-green-500 bg-gradient-to-br ' + style.gradient + ' shadow-lg ring-4 ring-green-500/10' : 'border-gray-100 bg-white hover:border-green-200 hover:shadow-md hover:-translate-y-0.5'}`}>
+                  <div className={`absolute top-3 right-3 md:top-4 md:right-4 transition-all duration-300 ${isSelected ? 'scale-100 rotate-0' : 'scale-0 rotate-45'}`}>
+                    <CheckCircle2 className="w-6 h-6 text-green-500 drop-shadow-sm" />
+                  </div>
+                  <div className="flex items-start gap-3 md:gap-4">
+                    <div className={`p-2.5 md:p-3 rounded-xl ${style.bgColor} ${style.color} transition-transform duration-300 ${isSelected ? 'scale-110' : 'group-hover:scale-105'}`}>
+                      <Icon className="w-7 h-7 md:w-8 md:h-8" />
+                    </div>
+                    <div className="flex-1 min-w-0 pr-6">
+                      <h3 className={`font-semibold mb-1 text-sm md:text-base ${isSelected ? 'text-green-900' : 'text-slate-800'}`}>{template.name}</h3>
+                      <p className={`text-xs md:text-sm leading-relaxed line-clamp-2 ${isSelected ? 'text-green-700/70' : 'text-gray-500'}`}>
+                        {template.description || template.code || 'Certificado disponible'}
+                      </p>
+                      {template.category && (
+                        <span className="inline-block mt-2 text-[10px] md:text-xs font-medium text-gray-400 bg-gray-100 px-2 py-0.5 rounded-full">{template.category}</span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* Bottom actions - sticky on mobile */}
+      <div className="flex flex-col-reverse sm:flex-row items-stretch sm:items-center justify-end gap-3 pt-2 pb-4 md:pb-0">
+        <button onClick={handleBack} className="px-5 py-3 rounded-xl text-gray-600 font-medium hover:bg-gray-100 active:bg-gray-200 transition-colors border border-gray-200 bg-white text-sm md:text-base">Cancelar</button>
+        <button disabled={!selectedTemplate} onClick={handleContinueToForm}
+          className={`flex items-center justify-center gap-2 px-6 md:px-8 py-3 rounded-xl font-medium transition-all duration-300 text-sm md:text-base ${selectedTemplate ? 'bg-green-500 text-white hover:bg-green-600 hover:shadow-lg active:scale-[0.97]' : 'bg-gray-100 text-gray-400 cursor-not-allowed'}`}>
+          Continuar <ChevronRight className="w-4 h-4 md:w-5 md:h-5" />
+        </button>
+      </div>
+    </div>
+  );
+
+  // ── SINGLE FORM ──
+  const renderSingleForm = () => (
+    <div className="bg-white p-5 md:p-8 rounded-3xl shadow-sm border border-gray-100 animate-[slideUp_0.4s_ease-out_forwards]">
+      <div className="mb-6 md:mb-8 flex items-center gap-3 border-b border-gray-100 pb-5 md:pb-6">
+        <div className="p-2 bg-green-50 rounded-xl"><FileText className="w-5 h-5 text-green-600" /></div>
         <div>
-          <h1 className="text-headline-lg font-headline-lg text-on-surface">
-            {isEditMode ? 'Editar solicitud' : isReuseMode ? 'Reutilizar datos' : 'Nueva solicitud'}
-          </h1>
-          <p className="text-body-md text-on-surface-variant">
-            {isEditMode ? 'Modifica los datos de la solicitud' : isReuseMode ? 'Corrige los datos y selecciona una plantilla para crear una nueva solicitud' : 'Solicita la emisión de certificados'}
+          <h2 className="text-base md:text-lg font-bold text-slate-800">Datos del certificado</h2>
+          <p className="text-xs md:text-sm text-gray-500">
+            Completa la información para <span className="font-semibold text-green-600">{selectedTemplate?.name}</span>
           </p>
         </div>
       </div>
 
-      {/* === STEP 1: CHOOSE TYPE (only for new, not edit) === */}
-      {!isEditMode && !creationType && (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <button
-            onClick={() => setCreationType('single')}
-            className="glass-card p-8 rounded-2xl text-left hover:shadow-lg hover:-translate-y-0.5 transition-all border border-white/40 group"
-          >
-            <div className="w-14 h-14 rounded-2xl bg-primary/10 flex items-center justify-center mb-4 group-hover:scale-110 transition-transform">
-              <FileText size={28} className="text-primary" />
+      {filteredVars.length === 0 ? (
+        <div className="text-center py-8 md:py-12">
+          <CheckCircle size={40} className="mx-auto text-green-300 mb-3" />
+          <p className="text-base font-semibold text-gray-500">Sin campos requeridos</p>
+          <p className="text-sm text-gray-400 mt-1">Esta plantilla no requiere datos adicionales</p>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-x-5 md:gap-x-6 gap-y-4 md:gap-y-5">
+          {filteredVars.map((variable, i) => (
+            <div key={variable} className={staggerClass(i)}>
+              <label className="block text-sm font-semibold text-slate-700 mb-2 capitalize">{variable.replace(/_/g, ' ')}</label>
+              {['fecha', 'date'].includes(variable) || variable.toLowerCase().includes('fecha') ? (
+                <input type="date"
+                  className="w-full p-3 md:p-3.5 rounded-xl border border-gray-200 focus:border-green-500 focus:ring-4 focus:ring-green-50 outline-none transition-all text-slate-600 text-sm md:text-base"
+                  value={formData[variable] || ''} onChange={e => setFormData({ ...formData, [variable]: e.target.value })} />
+              ) : ['horas', 'horas_', 'duracion'].includes(variable) || variable.toLowerCase().includes('hora') ? (
+                <input type="number" placeholder="Ej: 120"
+                  className="w-full p-3 md:p-3.5 rounded-xl border border-gray-200 focus:border-green-500 focus:ring-4 focus:ring-green-50 outline-none transition-all text-slate-600 placeholder-gray-400 text-sm md:text-base"
+                  value={formData[variable] || ''} onChange={e => setFormData({ ...formData, [variable]: e.target.value })} />
+              ) : ['email', 'correo', 'mail'].includes(variable) ? (
+                <input type="email" placeholder={`Ingresa ${variable.replace(/_/g, ' ')}`}
+                  className="w-full p-3 md:p-3.5 rounded-xl border border-gray-200 focus:border-green-500 focus:ring-4 focus:ring-green-50 outline-none transition-all text-slate-600 placeholder-gray-400 text-sm md:text-base"
+                  value={formData[variable] || ''} onChange={e => setFormData({ ...formData, [variable]: e.target.value })} />
+              ) : (
+                <input type="text" placeholder={`Ingresa ${variable.replace(/_/g, ' ')}`}
+                  className="w-full p-3 md:p-3.5 rounded-xl border border-gray-200 focus:border-green-500 focus:ring-4 focus:ring-green-50 outline-none transition-all text-slate-600 placeholder-gray-400 text-sm md:text-base"
+                  value={formData[variable] || ''} onChange={e => setFormData({ ...formData, [variable]: e.target.value })} />
+              )}
             </div>
-            <h3 className="text-lg font-bold text-on-surface mb-2">Solicitud única</h3>
-            <p className="text-sm text-on-surface-variant leading-relaxed">
-              Crea una solicitud de certificado llenando el formulario manualmente.
-              Ideal para casos individuales o pruebas rápidas.
-            </p>
-          </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 
-          <button
-            onClick={() => setCreationType('multiple')}
-            className="glass-card p-8 rounded-2xl text-left hover:shadow-lg hover:-translate-y-0.5 transition-all border border-white/40 group"
-          >
-            <div className="w-14 h-14 rounded-2xl bg-primary/10 flex items-center justify-center mb-4 group-hover:scale-110 transition-transform">
-              <Upload size={28} className="text-primary" />
-            </div>
-            <h3 className="text-lg font-bold text-on-surface mb-2">Múltiples solicitudes</h3>
-            <p className="text-sm text-on-surface-variant leading-relaxed">
-              Importa un archivo Excel con los datos de varios certificados.
-              Cada fila del archivo generará una solicitud independiente.
-            </p>
+  // ── MULTIPLE UPLOAD ──
+  const renderMultipleUpload = () => (
+    <div className="bg-white p-6 md:p-10 rounded-3xl shadow-sm border border-gray-100 animate-[slideUp_0.4s_ease-out_forwards]">
+      {excelData.length === 0 ? (
+        <div className="max-w-lg mx-auto space-y-5 md:space-y-6">
+          <button onClick={downloadTemplate} className="flex items-center gap-2 text-sm font-medium text-green-600 hover:text-green-700 bg-green-50 hover:bg-green-100 px-4 py-2 rounded-full transition-all duration-200 mx-auto">
+            <Download className="w-4 h-4" /> Descargar plantilla Excel
           </button>
+          <div className="border-2 border-dashed border-gray-200 bg-gray-50 rounded-3xl p-8 md:p-12 transition-all duration-300 hover:border-green-400 hover:bg-green-50/50 group">
+            <div className="w-14 h-14 md:w-16 md:h-16 bg-white rounded-full shadow-sm flex items-center justify-center mx-auto mb-5 md:mb-6 group-hover:scale-110 group-hover:shadow-md transition-all duration-300">
+              <FileUp className="w-7 h-7 md:w-8 md:h-8 text-green-500" />
+            </div>
+            <h3 className="text-lg md:text-xl font-bold text-slate-800 mb-2">Importar desde Excel</h3>
+            <p className="text-gray-500 text-xs md:text-sm mb-6 md:mb-8 leading-relaxed px-2">
+              Sube un archivo Excel (.xlsx o .csv). Cada fila será una solicitud independiente para <span className="font-semibold text-slate-700">{selectedTemplate?.name}</span>.
+            </p>
+            <button onClick={() => fileInputRef.current?.click()}
+              className="relative overflow-hidden flex items-center justify-center gap-2 w-full bg-green-500 text-white px-5 md:px-6 py-3 md:py-3.5 rounded-xl font-medium hover:bg-green-600 active:scale-[0.98] transition-all duration-200 shadow-sm hover:shadow-md text-sm md:text-base">
+              <Upload className="w-4 h-4 md:w-5 md:h-5" /> Seleccionar archivo
+              <input ref={fileInputRef} type="file" className="absolute inset-0 opacity-0 cursor-pointer" accept=".xlsx,.xls,.csv" onChange={handleFileUpload} />
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="space-y-4">
+          <div className="p-4 md:p-5 rounded-2xl space-y-3 border border-gray-100 bg-gray-50/50">
+            <div className="flex items-center justify-between">
+              <h3 className="text-xs md:text-sm font-bold text-slate-700 uppercase tracking-wider flex items-center gap-2"><AlertCircle size={14} /> Mapeo de columnas</h3>
+              <button onClick={() => { setExcelData([]); setExcelColumns([]); setColumnMapping({}); }} className="text-xs text-red-500 hover:text-red-600 font-medium">Cambiar</button>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+              {excelColumns.map(col => (
+                <div key={col} className="flex items-center gap-2 bg-white rounded-lg px-3 py-2.5 border border-gray-200">
+                  <span className="text-xs md:text-sm font-medium text-slate-700 w-1/3 truncate">{col}</span>
+                  <span className="text-gray-300 text-xs">→</span>
+                  <select className="text-xs md:text-sm bg-gray-50 border border-gray-200 rounded-lg px-2 py-1.5 flex-1 focus:border-green-500 outline-none" value={columnMapping[col] || ''} onChange={e => setColumnMapping({ ...columnMapping, [col]: e.target.value })}>
+                    <option value="">No importar</option>
+                    {filteredVars.map(v => <option key={v} value={v}>{v.replace(/_/g, ' ')}</option>)}
+                  </select>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="rounded-2xl overflow-hidden border border-gray-100">
+            <div className="flex items-center justify-between px-4 md:px-5 py-3 md:py-4 border-b border-gray-100 bg-gray-50/50">
+              <span className="font-semibold text-xs md:text-sm text-slate-800 flex items-center gap-2"><Table size={16} className="text-green-600" /> {excelData.length} filas</span>
+            </div>
+            <div className="overflow-x-auto max-h-48 md:max-h-64 overflow-y-auto">
+              <table className="w-full text-xs md:text-sm">
+                <thead><tr className="bg-gray-50">{excelColumns.map(col => <th key={col} className="text-left px-3 md:px-4 py-2 md:py-3 font-bold text-gray-500 uppercase whitespace-nowrap">{col}</th>)}</tr></thead>
+                <tbody className="divide-y divide-gray-100">
+                  {excelData.slice(0, 15).map((row, i) => (
+                    <tr key={i} className="hover:bg-green-50/30">{excelColumns.map(col => <td key={col} className="px-3 md:px-4 py-2 text-gray-600 truncate max-w-[150px] md:max-w-[200px]">{row[col] || '—'}</td>)}</tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {importing && (
+            <div className="p-4 rounded-2xl border border-green-200 bg-green-50">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-sm font-semibold text-slate-800">Importando...</span>
+                <span className="text-sm text-gray-500">{importProgress.current}/{importProgress.total}</span>
+              </div>
+              <div className="w-full bg-gray-200 rounded-full h-2 overflow-hidden"><div className="bg-green-500 h-full rounded-full transition-all duration-300" style={{ width: `${(importProgress.current / importProgress.total) * 100}%` }} /></div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+
+  // ── MAIN RETURN ──
+  return (
+    <div className="max-w-4xl mx-auto px-4 md:px-6 animate-fade-in">
+      {/* Edit/Reuse banner */}
+      {(isEditMode || isReuseMode) && (
+        <div className="bg-amber-50 rounded-2xl p-4 md:p-5 border border-amber-200/70 mb-6 animate-[slideUp_0.3s_ease-out_forwards]">
+          <div className="flex items-start gap-3">
+            <AlertCircle size={20} className="text-amber-600 shrink-0 mt-0.5" />
+            <div>
+              <h3 className="text-sm font-bold text-amber-800">{isEditMode ? 'Editando solicitud' : 'Reutilizando datos'}</h3>
+              {originalRejectionReason && <p className="text-xs text-amber-700/80 mt-1">Motivo: {originalRejectionReason}</p>}
+            </div>
+          </div>
         </div>
       )}
 
-      {/* === FORM (after type is selected) === */}
-      {creationType && (
-        <>
-          {/* Back to type selection */}
-          <button
-            onClick={() => {
-              setCreationType(null);
-              setSelectedTemplate('');
-              setFormData({});
-              setExcelData([]);
-              setExcelColumns([]);
-              setColumnMapping({});
-            }}
-            className="flex items-center gap-2 text-sm text-on-surface-variant hover:text-on-surface transition-colors"
-          >
-            <ArrowLeft size={16} />
-            Volver a seleccionar tipo
-          </button>
-
-          {/* Template selector (shared) */}
-          <div className="glass-card p-6 rounded-2xl space-y-4 border border-white/40">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center">
-                <FileText size={20} className="text-primary" />
-              </div>
-              <div>
-                <h2 className="text-lg font-bold text-on-surface">Plantilla</h2>
-                <p className="text-sm text-on-surface-variant">
-                  {templates.length === 0
-                    ? 'No hay plantillas disponibles para tu institución'
-                    : 'Selecciona el tipo de certificado a emitir'}
-                </p>
-              </div>
+      {/* View orchestrator with transition */}
+      <div className={`transition-all duration-300 ${viewTransitionClass}`}>
+        {currentView === 'TYPE_SELECTION' && renderTypeSelection()}
+        {currentView === 'TEMPLATE_SELECTION' && renderTemplateSelection()}
+        {currentView === 'ACTION_AREA' && (
+          <div className="space-y-6 md:space-y-8">
+            <div className="space-y-1">
+              <button onClick={handleBack} className="flex items-center gap-2 text-sm text-gray-500 hover:text-gray-800 transition-colors mb-3 md:mb-4 group -ml-1">
+                <ArrowLeft className="w-4 h-4 group-hover:-translate-x-1 transition-transform" />
+                <span className="group-hover:underline">Volver a plantillas</span>
+              </button>
+              <h1 className="text-3xl md:text-[42px] font-bold text-slate-800 tracking-tight">{isEditMode ? 'Editar solicitud' : 'Nueva solicitud'}</h1>
+              <p className="text-gray-500 text-sm md:text-base">{requestType === 'single' ? 'Completa los datos del certificado' : 'Importa datos desde Excel'}</p>
             </div>
 
-            <select
-              className="input w-full"
-              value={selectedTemplate}
-              onChange={e => handleTemplateChange(e.target.value)}
-            >
-              <option value="">Selecciona una plantilla...</option>
-              {templates.map(t => (
-                <option key={t.id} value={t.id}>
-                  {t.name} {t.code ? `(${t.code})` : ''} {t.category ? `· ${t.category}` : ''}
-                </option>
-              ))}
-            </select>
+            {requestType === 'single' ? renderSingleForm() : renderMultipleUpload()}
 
-            {selectedTemplate && !loadingTemplates && (
-              <div className="bg-surface-container-low rounded-lg px-4 py-3 flex items-center justify-between">
-                <p className="text-sm text-on-surface-variant/70">
-                  {templates.find(t => t.id === selectedTemplate)?.description || 'Sin descripción'}
-                </p>
-                <span className="text-xs text-on-surface-variant/50 font-mono">
-                  {filteredVars.length > 0
-                    ? `${filteredVars.length} campos`
-                    : templateVars.length > 0
-                      ? 'Solo campos del sistema'
-                      : 'Sin campos'}
-                </span>
-              </div>
-            )}
-          </div>
-
-          {/* Reuse mode banner */}
-          {isReuseMode && originalRejectedId && (
-            <div className="bg-amber-50 rounded-2xl p-5 border border-amber-200/70">
-              <div className="flex items-start gap-3">
-                <AlertCircle size={20} className="text-amber-600 shrink-0 mt-0.5" />
-                <div className="flex-1">
-                  <h3 className="text-sm font-bold text-amber-800 mb-1">Reutilizando datos de solicitud rechazada</h3>
-                  <p className="text-xs text-amber-700/80">
-                    Los datos de la solicitud anterior se han cargado. Puedes seleccionar una plantilla diferente,
-                    corregir los datos y crear una nueva solicitud.
-                  </p>
-                  {originalRejectionReason && (
-                    <div className="mt-2 bg-white/70 rounded-xl p-3 border border-amber-100">
-                      <span className="text-[10px] uppercase tracking-wider text-rose-600/70 font-bold block">Motivo del rechazo anterior</span>
-                      <p className="text-sm font-medium text-rose-700 mt-0.5">{originalRejectionReason}</p>
-                    </div>
-                  )}
-                  {/* Show original data */}
-                  {Object.keys(formData).length > 0 && (
-                    <details className="mt-3 group">
-                      <summary className="text-xs font-semibold text-amber-700 cursor-pointer hover:text-amber-800 transition-colors select-none">
-                        Ver datos originales ({Object.keys(formData).length} campos)
-                      </summary>
-                      <div className="mt-2 bg-white/60 rounded-xl p-3 border border-amber-100/80 grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
-                        {Object.entries(formData).map(([key, value]) => (
-                          <div key={key}>
-                            <span className="text-[10px] uppercase tracking-wider text-amber-600/60 font-bold block">{key.replace(/_/g, ' ')}</span>
-                            <span className="font-medium text-amber-900">{value || '—'}</span>
-                          </div>
-                        ))}
-                      </div>
-                    </details>
-                  )}
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* === SINGLE MODE === */}
-          {creationType === 'single' && (
-            <form onSubmit={handleIndividualSubmit} className="space-y-6">
-              {selectedTemplate && filteredVars.length > 0 && (
-                <div className="glass-card p-6 rounded-2xl space-y-5 border border-white/40">
-                  <div className="flex items-center gap-3 mb-2">
-                    <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center">
-                      <FileText size={20} className="text-primary" />
-                    </div>
-                    <div>
-                      <h2 className="text-lg font-bold text-on-surface">Datos del certificado</h2>
-                      <p className="text-sm text-on-surface-variant">Completa la información requerida</p>
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    {filteredVars.map((variable) => (
-                      <div key={variable}>
-                        <label className="block text-sm font-bold text-on-surface mb-2 capitalize">
-                          {variable.replace(/_/g, ' ')}
-                        </label>
-                        {['fecha', 'date'].includes(variable) || variable.toLowerCase().includes('fecha') ? (
-                          <input
-                            type="date"
-                            className="input w-full"
-                            value={formData[variable] || ''}
-                            onChange={e => setFormData({ ...formData, [variable]: e.target.value })}
-                          />
-                        ) : ['horas', 'horas_', 'duracion'].includes(variable) || variable.toLowerCase().includes('hora') ? (
-                          <input
-                            type="number"
-                            className="input w-full"
-                            placeholder="Ej: 120"
-                            value={formData[variable] || ''}
-                            onChange={e => setFormData({ ...formData, [variable]: e.target.value })}
-                          />
-                        ) : ['email', 'correo', 'mail'].includes(variable) ? (
-                          <input
-                            type="email"
-                            className="input w-full"
-                            placeholder={`Ingresa ${variable.replace(/_/g, ' ')}`}
-                            value={formData[variable] || ''}
-                            onChange={e => setFormData({ ...formData, [variable]: e.target.value })}
-                          />
-                        ) : (
-                          <input
-                            className="input w-full"
-                            placeholder={`Ingresa ${variable.replace(/_/g, ' ')}`}
-                            value={formData[variable] || ''}
-                            onChange={e => setFormData({ ...formData, [variable]: e.target.value })}
-                          />
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {selectedTemplate && filteredVars.length === 0 && templateVars.length > 0 && (
-                <div className="glass-card p-8 rounded-2xl text-center border border-white/40">
-                  <CheckCircle size={40} className="mx-auto text-primary/60 mb-3" />
-                  <p className="text-body-lg font-semibold text-on-surface-variant">Sin campos disponibles</p>
-                  <p className="text-body-md text-on-surface-variant/60 mt-1">
-                    Esta plantilla solo tiene campos del sistema (código, radicado) que se asignan automáticamente.
-                  </p>
-                </div>
-              )}
-
-              {!selectedTemplate && (
-                <div className="glass-card p-12 rounded-2xl text-center">
-                  <FileText size={48} className="mx-auto text-surface-variant mb-4" />
-                  <p className="text-body-lg font-semibold text-on-surface-variant">Selecciona una plantilla</p>
-                  <p className="text-body-md text-on-surface-variant/60 mt-1">Elige el tipo de certificado para comenzar</p>
-                </div>
-              )}
-
-              <div className="flex items-center justify-end gap-3">
-                <button type="button" onClick={() => navigate('/requests')} className="btn-secondary px-6 py-3">
-                  Cancelar
+            {/* Final actions */}
+            <div className="flex flex-col-reverse sm:flex-row items-stretch sm:items-center justify-end gap-3 pt-2 pb-6 md:pb-8 animate-[slideUp_0.4s_ease-out_0.1s_forwards] opacity-0">
+              <button onClick={handleBack} className="px-5 py-3 rounded-xl text-gray-600 border border-gray-200 font-medium hover:bg-gray-100 active:bg-gray-200 transition-colors bg-white text-sm md:text-base">Cancelar</button>
+              {requestType === 'single' ? (
+                <button onClick={handleIndividualSubmit} disabled={savingIndividual}
+                  className="flex items-center justify-center gap-2 px-6 md:px-8 py-3 rounded-xl font-medium transition-all duration-200 bg-green-500 text-white hover:bg-green-600 active:scale-[0.97] disabled:opacity-50 text-sm md:text-base">
+                  {savingIndividual ? <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" /> : <Save className="w-4 h-4 md:w-5 md:h-5" />}
+                  {isEditMode ? 'Actualizar' : 'Crear solicitud'}
                 </button>
-                <button
-                  type="submit"
-                  disabled={savingIndividual || !selectedTemplate}
-                  className="btn-primary px-8 py-3"
-                >
-                  {savingIndividual ? (
-                    <span className="flex items-center gap-2">
-                      <span className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                      {isEditMode ? 'Actualizando...' : 'Creando...'}
-                    </span>
-                  ) : (
-                    <><Save size={18} /> {isEditMode ? 'Actualizar solicitud' : 'Crear solicitud'}</>
-                  )}
-                </button>
-              </div>
-            </form>
-          )}
-
-          {/* === MASSIVE MODE === */}
-          {creationType === 'multiple' && (
-            <div className="space-y-6">
-              {/* Upload area */}
-              {excelData.length === 0 ? (
-                <div className="glass-card p-8 rounded-2xl border border-dashed border-outline-variant/50">
-                  <div className="flex flex-col items-center text-center">
-                    <div className="w-16 h-16 rounded-2xl bg-primary/10 flex items-center justify-center mb-4">
-                      <Upload size={32} className="text-primary" />
-                    </div>
-                    <h3 className="text-lg font-bold text-on-surface mb-1">{isEditMode ? 'Actualizar lote desde Excel' : 'Importar desde Excel'}</h3>
-                    <p className="text-sm text-on-surface-variant mb-6 max-w-md">
-                      {isEditMode
-                        ? 'Sube un archivo Excel (.xlsx o .csv) con los nuevos datos. Los datos del lote se actualizarán con la información del archivo.'
-                        : 'Sube un archivo Excel (.xlsx o .csv) con los datos de los certificados. Cada fila será una solicitud independiente.'}
-                    </p>
-
-                    <input
-                      ref={fileInputRef}
-                      type="file"
-                      accept=".xlsx,.xls,.csv"
-                      onChange={handleFileUpload}
-                      className="hidden"
-                    />
-
-                    <div className="flex flex-wrap items-center justify-center gap-3">
-                      <button
-                        onClick={() => fileInputRef.current?.click()}
-                        disabled={!selectedTemplate}
-                        className="btn-primary px-8 py-3"
-                      >
-                        <Upload size={18} /> Seleccionar archivo
-                      </button>
-
-                      {selectedTemplate && filteredVars.length > 0 && (
-                        <button
-                          onClick={downloadTemplate}
-                          className="btn-secondary px-8 py-3"
-                        >
-                          <Download size={18} /> Descargar plantilla Excel
-                        </button>
-                      )}
-                    </div>
-
-                    {!selectedTemplate && (
-                      <p className="text-xs text-warning-500 mt-3 flex items-center gap-1">
-                        <AlertCircle size={12} />
-                        Selecciona primero una plantilla
-                      </p>
-                    )}
-                  </div>
-                </div>
               ) : (
-                /* Preview & mapping */
-                <div className="space-y-4">
-                  {/* Mapping */}
-                  {filteredVars.length > 0 && (
-                    <div className="glass-card p-5 rounded-2xl space-y-3 border border-white/40">
-                      <h3 className="text-sm font-bold text-on-surface-variant uppercase tracking-wider flex items-center gap-2">
-                        <AlertCircle size={14} />
-                        Mapeo de columnas
-                      </h3>
-                      <p className="text-xs text-on-surface-variant/60">
-                        Relaciona las columnas del Excel con los campos de la plantilla
-                      </p>
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                        {excelColumns.map(col => (
-                          <div key={col} className="flex items-center gap-2 bg-surface-container-low rounded-lg px-3 py-2.5">
-                            <span className="text-sm font-medium text-on-surface w-1/3 truncate">{col}</span>
-                            <span className="text-on-surface-variant/40">&rarr;</span>
-                            <select
-                              className="text-sm bg-white border border-outline-variant/30 rounded-lg px-2 py-1.5 flex-1"
-                              value={columnMapping[col] || ''}
-                              onChange={e => setColumnMapping({ ...columnMapping, [col]: e.target.value })}
-                            >
-                              <option value="">No importar</option>
-                              {filteredVars.map(v => (
-                                <option key={v} value={v}>{v.replace(/_/g, ' ')}</option>
-                              ))}
-                            </select>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Preview table */}
-                  <div className="glass-card rounded-2xl overflow-hidden border border-white/40">
-                    <div className="flex items-center justify-between px-5 py-4 border-b border-outline-variant/10">
-                      <div className="flex items-center gap-2">
-                        <Table size={18} className="text-primary" />
-                        <span className="font-semibold text-sm text-on-surface">
-                          Vista previa ({excelData.length} filas)
-                        </span>
-                      </div>
-                      <button
-                        onClick={() => {
-                          setExcelData([]);
-                          setExcelColumns([]);
-                          setColumnMapping({});
-                          if (fileInputRef.current) fileInputRef.current.value = '';
-                        }}
-                        className="text-xs text-error hover:underline"
-                      >
-                        Cambiar archivo
-                      </button>
-                    </div>
-                    <div className="overflow-x-auto max-h-64 overflow-y-auto">
-                      <table className="w-full text-sm">
-                        <thead>
-                          <tr className="bg-surface-container-low/50">
-                            {excelColumns.map(col => (
-                              <th key={col} className="text-left px-4 py-3 text-xs font-bold text-on-surface-variant uppercase whitespace-nowrap">
-                                {col}
-                              </th>
-                            ))}
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-outline-variant/10">
-                          {excelData.slice(0, 20).map((row, i) => (
-                            <tr key={i} className="hover:bg-primary/[0.02]">
-                              {excelColumns.map(col => (
-                                <td key={col} className="px-4 py-2.5 text-sm text-on-surface-variant truncate max-w-[200px]">
-                                  {row[col] || <span className="text-on-surface-variant/30">—</span>}
-                                </td>
-                              ))}
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                    {excelData.length > 20 && (
-                      <div className="px-5 py-3 text-xs text-center text-on-surface-variant/50 bg-surface-container-low/30">
-                        Mostrando 20 de {excelData.length} filas
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Progress */}
-                  {importing && (
-                    <div className="glass-card p-5 rounded-2xl border border-primary/20">
-                      <div className="flex items-center justify-between mb-2">
-                        <span className="text-sm font-semibold text-on-surface">
-                          Importando...
-                        </span>
-                        <span className="text-sm text-on-surface-variant">
-                          {importProgress.current} / {importProgress.total}
-                        </span>
-                      </div>
-                      <div className="w-full bg-surface-container rounded-full h-2 overflow-hidden">
-                        <div
-                          className="bg-primary h-full rounded-full transition-all duration-300"
-                          style={{ width: `${(importProgress.current / importProgress.total) * 100}%` }}
-                        />
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Actions */}
-                  <div className="flex items-center justify-between gap-3">
-                    <button
-                      onClick={downloadTemplate}
-                      disabled={!filteredVars.length}
-                      className="btn-secondary px-4 py-2.5 text-sm"
-                    >
-                      <Download size={16} /> Descargar plantilla
-                    </button>
-                    <div className="flex items-center gap-3">
-                      <button onClick={() => navigate('/requests')} className="btn-secondary px-6 py-3">
-                        Cancelar
-                      </button>
-                      <button
-                        onClick={handleImportMassive}
-                        disabled={importing || excelData.length === 0}
-                        className="btn-primary px-8 py-3"
-                      >
-                        {importing ? (
-                          <span className="flex items-center gap-2">
-                            <span className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                            {isEditMode ? 'Actualizando...' : 'Importando...'}
-                          </span>
-                        ) : (
-                          <><Upload size={18} /> {isEditMode ? `Actualizar ${excelData.length} solicitudes` : `Importar ${excelData.length} solicitudes`}</>
-                        )}
-                      </button>
-                    </div>
-                  </div>
-                </div>
+                <button onClick={handleImportMassive} disabled={importing || excelData.length === 0}
+                  className="flex items-center justify-center gap-2 px-6 md:px-8 py-3 rounded-xl font-medium transition-all duration-200 bg-green-500 text-white hover:bg-green-600 active:scale-[0.97] disabled:opacity-50 text-sm md:text-base">
+                  {importing ? <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" /> : <Upload className="w-4 h-4 md:w-5 md:h-5" />}
+                  {isEditMode ? `Actualizar` : `Importar ${excelData.length} solicitudes`}
+                </button>
               )}
             </div>
-          )}
-        </>
-      )}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

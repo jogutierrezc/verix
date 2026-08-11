@@ -8,6 +8,13 @@ import {
 } from 'react';
 import { supabase, getUserProfile } from '../lib/supabase';
 import type { User } from '@supabase/supabase-js';
+import { userPermissionsApi } from '../services/api';
+
+export interface UserPermissions {
+  allowed_template_ids: string[];
+  can_create_requests: boolean;
+  can_view_all_requests: boolean;
+}
 
 interface Profile {
   id: string;
@@ -19,6 +26,7 @@ interface Profile {
   dependency_id?: string;
   signature_url?: string;
   status: string;
+  permissions?: UserPermissions;
 }
 
 interface AuthContextType {
@@ -41,6 +49,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const fetchProfile = useCallback(async (userId: string) => {
     try {
       const profile = await getUserProfile(userId);
+      // Fetch user permissions (skip for ADMIN - they have full access)
+      if (profile.role !== 'ADMIN') {
+        try {
+          const permissions = await userPermissionsApi.getMyPermissions(userId);
+          profile.permissions = permissions;
+        } catch {
+          // If permissions don't exist yet, default to full access
+          profile.permissions = {
+            allowed_template_ids: [],
+            can_create_requests: true,
+            can_view_all_requests: false,
+          };
+        }
+      }
       setUser(profile);
     } catch (error) {
       console.error('Error fetching profile:', error);

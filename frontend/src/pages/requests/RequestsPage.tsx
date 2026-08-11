@@ -143,6 +143,11 @@ export function RequestsPage() {
       if (user?.role === 'APPLICANT') query = query.eq('user_id', user.id);
       if (user?.role === 'SIGNER') query = query.in('status', ['PENDING', 'IN_REVIEW', 'APPROVED', 'REJECTED', 'SIGNED', 'REVOKED']);
 
+      // Apply user permissions filter (non-ADMIN users with specific template access)
+      if (user?.role !== 'ADMIN' && user?.permissions?.allowed_template_ids && user.permissions.allowed_template_ids.length > 0) {
+        query = query.in('template_id', user.permissions.allowed_template_ids);
+      }
+
       // Status filter
       if (statusFilter) query = query.eq('status', statusFilter);
 
