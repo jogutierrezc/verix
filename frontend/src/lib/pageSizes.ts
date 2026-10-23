@@ -10,6 +10,21 @@ export const PAGE_SIZES = {
 
 export type PageSizeName = keyof typeof PAGE_SIZES;
 
+/** Tamaño por defecto de todas las plantillas: Carta (US Letter, 8.5×11 in). */
+export const DEFAULT_PAGE_SIZE: PageSizeName = 'LETTER';
+
+/**
+ * Normaliza cualquier valor guardado (columna `page_size`, `config.pageSize`,
+ * "carta", "letter", "oficio"...) a una clave válida. Si falta, usa Carta.
+ */
+export function normalizePageSize(value: unknown): PageSizeName {
+  const v = String(value ?? '').trim().toUpperCase();
+  if (v === 'A4') return 'A4';
+  if (v === 'LEGAL' || v === 'OFICIO') return 'LEGAL';
+  if (v === 'LETTER' || v === 'CARTA') return 'LETTER';
+  return DEFAULT_PAGE_SIZE;
+}
+
 /**
  * Returns page width and height accounting for orientation.
  *
@@ -18,10 +33,10 @@ export type PageSizeName = keyof typeof PAGE_SIZES;
  * @returns { width, height } in points
  */
 export function getPageDimensions(
-  pageSize: PageSizeName = 'A4',
+  pageSize: PageSizeName = DEFAULT_PAGE_SIZE,
   orientation: 'portrait' | 'landscape' = 'portrait',
 ): { width: number; height: number } {
-  const dims = PAGE_SIZES[pageSize] || PAGE_SIZES.A4;
+  const dims = PAGE_SIZES[normalizePageSize(pageSize)];
 
   if (orientation === 'landscape') {
     // Swap width and height for landscape
@@ -35,5 +50,5 @@ export function getPageDimensions(
  * Returns the human-readable label for a page size.
  */
 export function getPageSizeLabel(pageSize: PageSizeName): string {
-  return PAGE_SIZES[pageSize]?.label ?? 'A4';
+  return PAGE_SIZES[normalizePageSize(pageSize)].label;
 }

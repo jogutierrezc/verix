@@ -27,6 +27,8 @@ ALTER TABLE public.user_permissions ENABLE ROW LEVEL SECURITY;
 -- ─────────────────────────────────────────────
 
 -- Admin puede todo
+DROP POLICY IF EXISTS "Admin can manage all user permissions"
+ON public.user_permissions;
 CREATE POLICY "Admin can manage all user permissions"
 ON public.user_permissions
 FOR ALL
@@ -35,6 +37,8 @@ USING (public.get_user_role() = 'ADMIN')
 WITH CHECK (public.get_user_role() = 'ADMIN');
 
 -- Usuarios pueden leer sus propios permisos
+DROP POLICY IF EXISTS "Users can read own permissions"
+ON public.user_permissions;
 CREATE POLICY "Users can read own permissions"
 ON public.user_permissions
 FOR SELECT
@@ -162,6 +166,7 @@ BEGIN
 END;
 $$;
 
+DROP TRIGGER IF EXISTS trigger_update_user_permissions_timestamp ON public.user_permissions;
 CREATE TRIGGER trigger_update_user_permissions_timestamp
   BEFORE UPDATE ON public.user_permissions
   FOR EACH ROW

@@ -7,9 +7,10 @@ import { QRCodeCanvas } from 'qrcode.react';
 import QRCode from 'qrcode';
 import toast from 'react-hot-toast';
 import jsPDF from 'jspdf';
-import { getPageDimensions, type PageSizeName } from '../../lib/pageSizes';
+import { getPageDimensions, normalizePageSize } from '../../lib/pageSizes';
 import type { TemplateElement } from '../editor/TemplateCanvas';
 import { getRobotoFontData, registerRobotoFonts } from '../../lib/pdfFonts';
+import { parseRichText, fillVars, RichText, templateTextStyle } from '../../lib/richText';
 
 interface CertificatePreviewProps {
   requestId: string;
@@ -201,7 +202,7 @@ function mapFont(fontFamily?: string): string {
 }
 
 function mapFontStyle(bold?: boolean, italic?: boolean): string {
-  if (!robotoReady) return 'normal'; // Helvetica only has 'normal'
+  // Roboto y las fuentes base de jsPDF (Helvetica/Courier) tienen los 4 estilos
   if (bold && italic) return 'bolditalic';
   if (bold) return 'bold';
   if (italic) return 'italic';
@@ -251,8 +252,9 @@ export async function renderTemplateToPdf(
   const orientation = pageOrientation === 'landscape' ? 'l' : 'p';
   const pdf = new jsPDF(orientation, 'pt', [pageWidth, pageHeight]);
 
-  // ── Register Roboto font (fetched once from Google Fonts CSS2 API) ──
-  // If Roboto fails to load, Helvetica is used as fallback by jsPDF
+  // ── Register Roboto (TTF servido desde /fonts) ──
+  // Si falla, jsPDF usa Helvetica, que también soporta negrilla y cursiva
+  robotoReady = false;
   try {
     const fontData = await getRobotoFontData();
     if (fontData) {
@@ -266,11 +268,6 @@ export async function renderTemplateToPdf(
     console.warn('⚠️ No se pudo cargar Roboto, usando Helvetica:', e);
     pdf.setFont('Helvetica', 'normal');
   }
-
-  // ── Match preview CSS constants ──
-  const PAD_X = 4;  // preview: padding '2px 4px' → horizontal 4px
-  const PAD_Y = 2;  // preview: padding '2px 4px' → vertical 2px
-  const LINE_HEIGHT = 1.2;  // preview: lineHeight 1.2
 
   // ── Group elements by page and sort by page number ──
   const pageMap = new Map<number, TemplateElement[]>();
@@ -300,8 +297,6 @@ export async function renderTemplateToPdf(
     const h = el.height;
     const color = el.color || '#191c1e';
     const rgb = hexToRgb(color);
-    const align = el.align || 'left';
-    const fontSize = el.fontSize || 14;
 
     try {
       // ── 1. BACKGROUND: white background only for QR (matches preview bg-white)
@@ -407,71 +402,8 @@ export async function renderTemplateToPdf(
       }
 
       // ── 6. TEXT (text, date, consecutive) ──
-      if ((el.type === 'text' || el.type === 'date' || el.type === 'consecutive') && content) {
-        pdf.setFont(mapFont(el.fontFamily), mapFontStyle(el.bold, el.italic));
-        pdf.setFontSize(fontSize);
-        pdf.setTextColor(rgb[0], rgb[1], rgb[2]);
-
-        const maxTextWidth = Math.max(1, w - PAD_X * 2);
-        const lineHeight = fontSize * LINE_HEIGHT;
-
-        // Split text into lines respecting maxWidth (matching preview's wordBreak)
-        const lines = pdf.splitTextToSize(content, maxTextWidth);
-
-        // Calculate actual text block height (lineHeight * number of lines)
-        const textBlockHeight = lines.length > 0 ? lines.length * lineHeight : 0;
-        const availableHeight = h - PAD_Y * 2;
-
-        // Vertical centering: Y = top padding + remaining space / 2
-        // With baseline:'top', text TOP starts at Y
-        let textY: number;
-        if (textBlockHeight < availableHeight) {
-          textY = y + PAD_Y + (availableHeight - textBlockHeight) / 2;
-        } else {
-          textY = y + PAD_Y;
-        }
-
-        // Determine alignment-specific X coordinate for the text block
-        const textAlign: 'left' | 'center' | 'right' = align === 'justify' ? 'left' : align;
-        const baseX = align === 'center'
-          ? x + w / 2
-          : align === 'right'
-            ? x + w - PAD_X
-            : x + PAD_X;
-
-        if (lines.length > 0) {
-          for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
-            const line = lines[lineIdx];
-            const isLastLine = lineIdx === lines.length - 1;
-
-            if (align === 'justify' && !isLastLine && line.includes(' ')) {
-              const words = line.trim().split(/\s+/);
-              const wordsWidth = words.reduce((sum: number, word: string) => sum + pdf.getTextWidth(word), 0);
-              const totalGap = maxTextWidth - wordsWidth;
-              const gapBetween = words.length > 1 ? totalGap / (words.length - 1) : 0;
-
-              if (words.length > 1 && gapBetween > 0) {
-                let currentX = baseX;
-                for (let wIdx = 0; wIdx < words.length; wIdx++) {
-                  pdf.text(words[wIdx], currentX, textY, { baseline: 'top' });
-                  if (wIdx < words.length - 1) {
-                    currentX += pdf.getTextWidth(words[wIdx]) + gapBetween;
-                  }
-                }
-              } else {
-                pdf.text(line, baseX, textY, { maxWidth: maxTextWidth, align: 'left', baseline: 'top' });
-              }
-            } else {
-              pdf.text(line, baseX, textY, {
-                maxWidth: maxTextWidth,
-                align: textAlign,
-                baseline: 'top',
-              });
-            }
-
-            textY += lineHeight;
-          }
-        }
+      if ((el.type === 'text' || el.type === 'date' || el.type === 'consecutive') && el.content) {
+        drawRichText(pdf, el, requestData, rgb);
       }
     } catch (err) {
       console.warn(`⚠️ Error rendering element ${el.id || el.type}:`, err);
@@ -480,6 +412,139 @@ export async function renderTemplateToPdf(
   }
 
   return pdf;
+}
+
+// ── Maquetador de texto: negrillas/cursivas por tramo, párrafos y justificado sin guiones ──
+
+interface TextPiece { text: string; bold: boolean; italic: boolean; width: number }
+type TextWord = TextPiece[];
+
+function drawRichText(
+  pdf: jsPDF,
+  el: TemplateElement,
+  data: Record<string, any>,
+  rgb: [number, number, number],
+) {
+  const PAD_X = 4;
+  const PAD_Y = 2;
+  const LINE_HEIGHT = 1.2;
+  const fontSize = el.fontSize || 14;
+  const family = mapFont(el.fontFamily);
+  const align = el.align || 'left';
+  const maxW = Math.max(1, el.width - PAD_X * 2);
+
+  pdf.setFontSize(fontSize);
+  pdf.setTextColor(rgb[0], rgb[1], rgb[2]);
+
+  const measure = (text: string, bold: boolean, italic: boolean) => {
+    pdf.setFont(family, mapFontStyle(bold, italic));
+    return pdf.getTextWidth(text);
+  };
+  const spaceW = measure(' ', !!el.bold, !!el.italic);
+
+  // 1. Texto → párrafos → palabras (una palabra puede mezclar estilos: "**Juan**,")
+  const segments = parseRichText(el.content, !!el.bold, !!el.italic).map((s) => ({
+    ...s,
+    text: fillVars(s.text, data),
+  }));
+  const paragraphs: TextWord[][] = [[]];
+  let current: TextWord | null = null;
+  for (const seg of segments) {
+    const chunks = seg.text.split(/(\n|[ \t]+)/);
+    for (const chunk of chunks) {
+      if (chunk === '') continue;
+      if (chunk === '\n') {
+        paragraphs.push([]);
+        current = null;
+      } else if (/^[ \t]+$/.test(chunk)) {
+        current = null;
+      } else {
+        const piece: TextPiece = { text: chunk, bold: seg.bold, italic: seg.italic, width: measure(chunk, seg.bold, seg.italic) };
+        if (!current) {
+          current = [];
+          paragraphs[paragraphs.length - 1].push(current);
+        }
+        current.push(piece);
+      }
+    }
+  }
+
+  // 2. Palabras demasiado largas se parten por caracteres (sin guion)
+  const wordWidth = (w: TextWord) => w.reduce((n, p) => n + p.width, 0);
+  const splitLongWord = (w: TextWord): TextWord[] => {
+    if (wordWidth(w) <= maxW) return [w];
+    const parts: TextWord[] = [];
+    let acc: TextWord = [];
+    let accW = 0;
+    for (const piece of w) {
+      for (const ch of piece.text) {
+        const cw = measure(ch, piece.bold, piece.italic);
+        if (accW + cw > maxW && acc.length) { parts.push(acc); acc = []; accW = 0; }
+        const last = acc[acc.length - 1];
+        if (last && last.bold === piece.bold && last.italic === piece.italic) {
+          last.text += ch; last.width += cw;
+        } else {
+          acc.push({ text: ch, bold: piece.bold, italic: piece.italic, width: cw });
+        }
+        accW += cw;
+      }
+    }
+    if (acc.length) parts.push(acc);
+    return parts;
+  };
+
+  // 3. Saltos de línea voraces
+  interface Line { words: TextWord[]; last: boolean }
+  const lines: Line[] = [];
+  for (const para of paragraphs) {
+    const words = para.flatMap(splitLongWord);
+    if (words.length === 0) { lines.push({ words: [], last: true }); continue; }
+    let row: TextWord[] = [];
+    let rowW = 0;
+    for (const word of words) {
+      const w = wordWidth(word);
+      const needed = row.length ? rowW + spaceW + w : w;
+      if (row.length && needed > maxW) {
+        lines.push({ words: row, last: false });
+        row = [word];
+        rowW = w;
+      } else {
+        row.push(word);
+        rowW = needed;
+      }
+    }
+    lines.push({ words: row, last: true });
+  }
+
+  // 4. Posición vertical (centrado si cabe, igual que la vista previa)
+  const lineHeight = fontSize * LINE_HEIGHT;
+  const blockH = lines.length * lineHeight;
+  const availH = el.height - PAD_Y * 2;
+  let y = blockH < availH ? el.y + PAD_Y + (availH - blockH) / 2 : el.y + PAD_Y;
+
+  // 5. Dibujo
+  for (const line of lines) {
+    if (line.words.length) {
+      const wordsW = line.words.reduce((n, w) => n + wordWidth(w), 0);
+      const naturalW = wordsW + spaceW * (line.words.length - 1);
+      const justify = align === 'justify' && !line.last && line.words.length > 1;
+      const gap = justify ? (maxW - wordsW) / (line.words.length - 1) : spaceW;
+      const lineW = justify ? maxW : naturalW;
+      let x = el.x + PAD_X;
+      if (align === 'center') x = el.x + (el.width - lineW) / 2;
+      else if (align === 'right') x = el.x + el.width - PAD_X - lineW;
+
+      for (const word of line.words) {
+        for (const piece of word) {
+          pdf.setFont(family, mapFontStyle(piece.bold, piece.italic));
+          pdf.text(piece.text, x, y, { baseline: 'top' });
+          x += piece.width;
+        }
+        x += gap;
+      }
+    }
+    y += lineHeight;
+  }
 }
 
 /** Get intrinsic dimensions of an image from a data URL */
@@ -547,7 +612,12 @@ export function CertificatePreview({
       if (tmplErr) throw tmplErr;
 
       setRequest(req);
-      setTemplateConfig(tmpl?.config || tmpl);
+      const baseConfig = typeof tmpl?.config === 'string' ? safeJsonParse(tmpl.config) : (tmpl?.config || {});
+      setTemplateConfig({
+        ...baseConfig,
+        pageSize: baseConfig.pageSize ?? tmpl?.page_size,
+        orientation: baseConfig.orientation ?? tmpl?.orientation,
+      });
 
       // 3. Load authorized signatures for this institution
       if (userInstitutionId) {
@@ -968,8 +1038,9 @@ export function CertificatePreview({
 
   const elements: TemplateElement[] = rawConfig?.elements || [];
   const pageOrientation = rawConfig?.orientation || 'landscape';
-  const pageSizeName: PageSizeName = rawConfig?.pageSize || 'A4';
-  const { width: pageWidth, height: pageHeight } = getPageDimensions(pageSizeName, pageOrientation);
+  const { width: pageWidth, height: pageHeight } = getPageDimensions(normalizePageSize(rawConfig?.pageSize), pageOrientation);
+  const pageNumbers = [...new Set(elements.map(el => el.page ?? 0))].sort((a, b) => a - b);
+  if (pageNumbers.length === 0) pageNumbers.push(0);
   const scale = 0.55;
 
   // Build data dictionary with variables for template substitution
@@ -1086,8 +1157,8 @@ export function CertificatePreview({
 
       // Text, date, consecutive and any other type
       return (
-        <span className="w-full" style={{ whiteSpace: 'pre-wrap' }}>
-          {filledContent}
+        <span className="w-full" style={templateTextStyle(el.align)}>
+          <RichText content={el.content} data={requestData} bold={el.bold} italic={el.italic} />
         </span>
       );
     };
@@ -1107,9 +1178,6 @@ export function CertificatePreview({
           className="w-full h-full flex items-center overflow-hidden"
           style={{
             fontSize: (el.fontSize || 14) * scale,
-            fontWeight: el.bold ? 'bold' : 'normal',
-            fontStyle: el.italic ? 'italic' : 'normal',
-            textAlign: el.align || 'left',
             color: el.color || '#191c1e',
             fontFamily: el.fontFamily || 'Roboto, serif',
             background: bgStyle,
@@ -1118,7 +1186,6 @@ export function CertificatePreview({
             justifyContent: el.align === 'center' ? 'center' : el.align === 'right' ? 'flex-end' : 'flex-start',
             padding: '2px 4px',
             lineHeight: 1.2,
-            wordBreak: 'break-word',
           }}
         >
           {renderContent()}
@@ -1236,34 +1303,37 @@ export function CertificatePreview({
                 </div>
               </div>
 
-              {/* Certificate preview */}
-              <div className="flex justify-center">
-                <div
-                  ref={certificateRef}
-                  className="bg-white shadow-xl rounded-sm overflow-hidden relative"
-                  style={{
-                    width: pageWidth * scale,
-                    height: pageHeight * scale,
-                    boxShadow: '0 4px 24px rgba(0,0,0,0.12)',
-                  }}
-                >
+              {/* Certificate preview — una hoja por página, en tamaño real de papel */}
+              <div className="flex flex-col items-center gap-6">
+                {pageNumbers.map((pageNo) => (
                   <div
-                    className="absolute inset-0 opacity-[0.015] pointer-events-none"
+                    key={pageNo}
+                    ref={pageNo === pageNumbers[0] ? certificateRef : undefined}
+                    className="bg-white overflow-hidden relative ring-1 ring-black/10"
                     style={{
-                      backgroundImage: 'radial-gradient(circle, #006e2f 1px, transparent 1px)',
-                      backgroundSize: '20px 20px',
+                      width: pageWidth * scale,
+                      height: pageHeight * scale,
+                      boxShadow: '0 1px 2px rgba(0,0,0,0.08), 0 8px 24px rgba(0,0,0,0.10)',
                     }}
-                  />
-                  {elements.map((el, i) => renderPreviewElement(el, i))}
-                  {elements.length === 0 && (
-                    <div className="absolute inset-0 flex items-center justify-center text-on-surface-variant/40">
-                      <div className="text-center">
-                        <FileText size={48} className="mx-auto mb-2 opacity-40" />
-                        <p className="text-sm font-medium">Sin elementos en la plantilla</p>
+                  >
+                    {elements
+                      .filter(el => (el.page ?? 0) === pageNo)
+                      .map((el, i) => renderPreviewElement(el, i))}
+                    {pageNumbers.length > 1 && (
+                      <span className="absolute bottom-1 right-2 text-[9px] text-black/30 tabular-nums">
+                        {pageNo + 1}/{pageNumbers.length}
+                      </span>
+                    )}
+                    {elements.length === 0 && (
+                      <div className="absolute inset-0 flex items-center justify-center text-on-surface-variant/40">
+                        <div className="text-center">
+                          <FileText size={48} className="mx-auto mb-2 opacity-40" />
+                          <p className="text-sm font-medium">Sin elementos en la plantilla</p>
+                        </div>
                       </div>
-                    </div>
-                  )}
-                </div>
+                    )}
+                  </div>
+                ))}
               </div>
 
               {/* SIGNATURE SELECTOR — only for PENDING (non read-only) */}

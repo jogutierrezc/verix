@@ -15,6 +15,8 @@ SELECT 'verix', 'verix', true, false
 WHERE NOT EXISTS (SELECT 1 FROM storage.buckets WHERE id = 'verix');
 
 -- 3. Política de lectura pública para logos institucionales
+DROP POLICY IF EXISTS "Public can read institution logos"
+ON storage.objects;
 CREATE POLICY "Public can read institution logos"
 ON storage.objects FOR SELECT
 TO public
@@ -24,6 +26,8 @@ USING (
 );
 
 -- 4. Política de inserción para usuarios autenticados (admins)
+DROP POLICY IF EXISTS "Authenticated users can upload institution logos"
+ON storage.objects;
 CREATE POLICY "Authenticated users can upload institution logos"
 ON storage.objects FOR INSERT
 TO authenticated
@@ -33,6 +37,8 @@ WITH CHECK (
 );
 
 -- 5. Política de eliminación para admins
+DROP POLICY IF EXISTS "Authenticated users can delete institution logos"
+ON storage.objects;
 CREATE POLICY "Authenticated users can delete institution logos"
 ON storage.objects FOR DELETE
 TO authenticated

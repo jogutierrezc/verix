@@ -11,7 +11,7 @@ import { saveAs } from 'file-saver';
 import * as XLSX from 'xlsx';
 import { CertificatePreview, renderTemplateToPdf, fillTemplate, convertDatesInData, safeJsonParse } from '../../components/certificate/CertificatePreview';
 import type { TemplateElement } from '../../components/editor/TemplateCanvas';
-import { getPageDimensions, type PageSizeName } from '../../lib/pageSizes';
+import { getPageDimensions, normalizePageSize, type PageSizeName } from '../../lib/pageSizes';
 import { SkeletonCard } from '../../components/ui/SkeletonCard';
 import { Modal } from '../../components/ui/Modal';
 import { extractTemplateVariables, SYSTEM_VARS } from './CreateRequestPage';
@@ -1054,7 +1054,7 @@ export function RequestsPage() {
 
       const elements: TemplateElement[] = rawConfig.elements || [];
       const pageOrientation = rawConfig.orientation || 'landscape';
-      const pageSizeName: PageSizeName = rawConfig.pageSize || 'A4';
+      const pageSizeName: PageSizeName = normalizePageSize(rawConfig.pageSize);
       const { width: pageWidth, height: pageHeight } = getPageDimensions(pageSizeName, pageOrientation);
 
       // 2. Build request data with validation URL
@@ -1186,7 +1186,7 @@ export function RequestsPage() {
 
           const elements: TemplateElement[] = templateConfig.elements || [];
           const pageOrientation = templateConfig.orientation || 'landscape';
-          const pageSizeName: PageSizeName = templateConfig.pageSize || 'A4';
+          const pageSizeName: PageSizeName = normalizePageSize(templateConfig.pageSize);
           const { width: pageWidth, height: pageHeight } = getPageDimensions(pageSizeName, pageOrientation);
 
           const rawData = req.data || {};

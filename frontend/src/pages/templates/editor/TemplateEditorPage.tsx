@@ -1,7 +1,9 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import { supabase, STORAGE } from '../../../lib/supabase';
 import { TemplateCanvas, TemplateElement } from '../../../components/editor/TemplateCanvas';
+import { DEFAULT_PAGE_SIZE, normalizePageSize, type PageSizeName } from '../../../lib/pageSizes';
+import { stripRichText } from '../../../lib/richText';
 import {
   Save,
   ArrowLeft,
@@ -61,6 +63,24 @@ function PropertiesPanel({
   onDelete: () => void;
   onImageUpload?: (file: File) => Promise<string>;
 }) {
+  const contentRef = useRef<HTMLTextAreaElement>(null);
+
+  /** Envuelve la selección con la marca (** negrilla, __ cursiva) o la quita si ya está. */
+  const wrapSelection = (mark: string) => {
+    const ta = contentRef.current;
+    if (!ta) return;
+    const { selectionStart: a, selectionEnd: b, value } = ta;
+    const sel = value.slice(a, b);
+    const wrapped = sel.startsWith(mark) && sel.endsWith(mark) && sel.length >= mark.length * 2
+      ? sel.slice(mark.length, sel.length - mark.length)
+      : `${mark}${sel}${mark}`;
+    onUpdate({ content: value.slice(0, a) + wrapped + value.slice(b) });
+    requestAnimationFrame(() => {
+      ta.focus();
+      ta.setSelectionRange(a, a + wrapped.length);
+    });
+  };
+
   return (
     <div className="space-y-4 animate-fade-in">
       <div className="flex items-center justify-between">
@@ -88,13 +108,39 @@ function PropertiesPanel({
 
       {(element.type === 'text' || element.type === 'date' || element.type === 'consecutive') && (
         <div>
-          <label className="label">Contenido</label>
+          <div className="flex items-center justify-between mb-1.5">
+            <label className="label !mb-0">Contenido</label>
+            <div className="flex gap-1">
+              <button
+                type="button"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => wrapSelection('**')}
+                className="w-7 h-7 rounded-md bg-surface-container-low hover:bg-surface-container-high text-on-surface flex items-center justify-center"
+                title="Negrilla en la selección (**texto**)"
+              >
+                <Bold size={14} />
+              </button>
+              <button
+                type="button"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => wrapSelection('__')}
+                className="w-7 h-7 rounded-md bg-surface-container-low hover:bg-surface-container-high text-on-surface flex items-center justify-center"
+                title="Cursiva en la selección (__texto__)"
+              >
+                <Italic size={14} />
+              </button>
+            </div>
+          </div>
           <textarea
-            className="input resize-none h-20 text-sm"
+            ref={contentRef}
+            className="input resize-none h-28 text-sm"
             value={element.content}
             onChange={(e) => onUpdate({ content: e.target.value })}
             placeholder="Texto o {{variable}}"
           />
+          <p className="mt-1 text-[10px] text-on-surface-variant/60 leading-snug">
+            Selecciona una parte y pulsa <b>B</b> para ponerla en negrilla dentro del párrafo, por ejemplo <code>**{'{{nombre_estudiante}}'}**</code>.
+          </p>
         </div>
       )}
 
@@ -189,7 +235,7 @@ function PropertiesPanel({
                 element.bold ? 'bg-primary text-on-primary' : 'bg-surface-container-low text-on-surface-variant hover:bg-surface-container-high'
               }`}
             >
-              <Bold size={14} /> Negrita
+              <Bold size={14} /> Todo en negrilla
             </button>
             <button
               onClick={() => onUpdate({ italic: !element.italic })}
@@ -197,7 +243,7 @@ function PropertiesPanel({
                 element.italic ? 'bg-primary text-on-primary' : 'bg-surface-container-low text-on-surface-variant hover:bg-surface-container-high'
               }`}
             >
-              <Italic size={14} /> Cursiva
+              <Italic size={14} /> Todo en cursiva
             </button>
           </div>
 
@@ -315,7 +361,7 @@ export function TemplateEditorPage() {
   const [code, setCode] = useState('');
   const [category, setCategory] = useState('certificate');
   const [orientation, setOrientation] = useState<'portrait' | 'landscape'>('landscape');
-  const [pageSize, setPageSize] = useState<'A4' | 'LETTER' | 'LEGAL'>('A4');
+  const [pageSize, setPageSize] = useState<PageSizeName>(DEFAULT_PAGE_SIZE);
   const [activePage, setActivePage] = useState(0);
   const [elements, setElements] = useState<TemplateElement[]>([]);
   const [logoUrl, setLogoUrl] = useState<string>('');
@@ -365,7 +411,7 @@ export function TemplateEditorPage() {
         setCategory(data.category || 'certificate');
         setOrientation(data.orientation as 'portrait' | 'landscape');
         const config = data.config as any;
-        setPageSize((data.page_size as any) || config?.pageSize || 'A4');
+        setPageSize(normalizePageSize(config?.pageSize ?? data.page_size));
         setDependencyId(data.dependency_id || '');
         setElements(config?.elements || []);
         setLogoUrl(config?.logoUrl || '');
@@ -538,9 +584,9 @@ export function TemplateEditorPage() {
             <option value="academic">Académico</option>
             <option value="minute">Acta</option>
           </select>
-          <select className="input w-28" value={pageSize} onChange={e => setPageSize(e.target.value as any)}>
+          <select className="input w-40" value={pageSize} onChange={e => setPageSize(e.target.value as PageSizeName)}>
             <option value="A4">A4</option>
-            <option value="LETTER">Carta</option>
+            <option value="LETTER">Carta (8.5×11 in)</option>
             <option value="LEGAL">Oficio</option>
           </select>
           <select className="input w-28" value={orientation} onChange={e => setOrientation(e.target.value as any)}>
@@ -801,10 +847,10 @@ export function TemplateEditorPage() {
                     <button key={el.id} onClick={() => setSelectedElementId(el.id)}
                       className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-xs cursor-pointer transition-colors ${
                         selectedElementId === el.id ? 'bg-primary/10 text-primary' : 'hover:bg-surface-container-low text-on-surface-variant'
-                      }`} title={el.content}>
+                      }`} title={stripRichText(el.content)}>
                       <span className="text-on-surface-variant/40 w-4 font-mono">{i + 1}</span>
                       <span className="capitalize flex-1 font-medium text-left">{el.type}</span>
-                      <span className="truncate max-w-[100px]">{el.content}</span>
+                      <span className="truncate max-w-[100px]">{stripRichText(el.content)}</span>
                     </button>
                   ))}
                   {elements.length === 0 && (

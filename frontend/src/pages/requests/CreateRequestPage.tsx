@@ -1,15 +1,17 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../hooks/useAuth';
 import { supabase } from '../../lib/supabase';
 import {
   ArrowLeft, Save, FileText, Upload, Table, AlertCircle, CheckCircle, Download,
-  FileBadge, GraduationCap, Award, ScrollText, ChevronRight, FileUp, CheckCircle2
+  FileBadge, GraduationCap, Award, ScrollText, ChevronRight, FileUp, CheckCircle2, Search
 } from 'lucide-react';
 import { requestsApi, auditApi, getClientIP } from '../../services/api';
 import toast from 'react-hot-toast';
 import * as XLSX from 'xlsx';
 import { SkeletonCard } from '../../components/ui/SkeletonCard';
+import { TemplateThumb } from '../../components/editor/TemplateThumb';
+import { getPageSizeLabel, normalizePageSize } from '../../lib/pageSizes';
 
 export const SYSTEM_VARS = new Set(['codigo', 'codigo_certificado', 'radicado', 'consecutivo']);
 
@@ -69,6 +71,10 @@ export function CreateRequestPage() {
   const [templates, setTemplates] = useState<any[]>([]);
   const [loadingTemplates, setLoadingTemplates] = useState(true);
 
+  // Template picker
+  const [templateSearch, setTemplateSearch] = useState('');
+  const [categoryFilter, setCategoryFilter] = useState<string>('all');
+
   // Template variables & form
   const [filteredVars, setFilteredVars] = useState<string[]>([]);
   const [formData, setFormData] = useState<Record<string, string>>({});
@@ -89,8 +95,10 @@ export function CreateRequestPage() {
 
   // ── Load templates ──
   useEffect(() => { if (user) loadTemplates(); }, [user]);
-  useEffect(() => { if (reuseId && user && !editId) loadRejectedData(); }, [reuseId, user, editId]);
-  useEffect(() => { if (editId && user) loadExistingRequest(); }, [editId, user]);
+  // Esperar a que carguen las plantillas: antes la solicitud se leía en paralelo,
+  // `templates` seguía vacío y el formulario quedaba sin plantilla hasta recargar.
+  useEffect(() => { if (reuseId && user && !editId && !loadingTemplates) loadRejectedData(); }, [reuseId, user, editId, loadingTemplates]);
+  useEffect(() => { if (editId && user && !loadingTemplates) loadExistingRequest(); }, [editId, user, loadingTemplates]);
 
   const loadTemplates = async () => {
     setLoadingTemplates(true);
@@ -109,6 +117,18 @@ export function CreateRequestPage() {
     finally { setLoadingTemplates(false); }
   };
 
+  /** Plantilla por id: la lista cargada puede no incluirla (permisos, inactiva). */
+  const resolveTemplate = async (templateId: string) => {
+    const found = templates.find(t => t.id === templateId);
+    if (found) return found;
+    const { data } = await supabase
+      .from('templates')
+      .select('id, name, code, description, variables, category, config')
+      .eq('id', templateId)
+      .maybeSingle();
+    return data || null;
+  };
+
   const loadRejectedData = async () => {
     try {
       const { data, error } = await supabase.from('certificate_requests').select('*, template:templates(name)').eq('id', reuseId).single();
@@ -118,7 +138,7 @@ export function CreateRequestPage() {
       setOriginalRejectedId(reuseId);
       setOriginalRejectionReason(data.rejection_reason);
       if (data.data && typeof data.data === 'object') setFormData(data.data as Record<string, string>);
-      const template = templates.find(t => t.id === data.template_id);
+      const template = await resolveTemplate(data.template_id);
       if (template) { setSelectedTemplate(template); handleTemplateSelect(template, false); }
       setCurrentView('ACTION_AREA');
       setRequestType(data.type === 'MASSIVE' || data.batch_id ? 'multiple' : 'single');
@@ -134,7 +154,7 @@ export function CreateRequestPage() {
       const editableStatuses = ['DRAFT', 'PENDING', 'IN_REVIEW', 'REJECTED'];
       if (!editableStatuses.includes(data.status)) { toast.error('No puede editarse'); navigate('/requests'); return; }
       setRequestType(data.type === 'MASSIVE' || data.batch_id ? 'multiple' : 'single');
-      const template = templates.find(t => t.id === data.template_id);
+      const template = await resolveTemplate(data.template_id);
       if (template) { setSelectedTemplate(template); handleTemplateSelect(template, false); }
       if (data.data && typeof data.data === 'object') setFormData(data.data as Record<string, string>);
       setOriginalRequestId(editId!);
@@ -142,6 +162,17 @@ export function CreateRequestPage() {
       setCurrentView('ACTION_AREA');
     } catch (err: any) { toast.error('Error al cargar solicitud'); navigate('/requests'); }
   };
+
+  const categories = useMemo(
+    () => [...new Set(templates.map(t => t.category).filter(Boolean))] as string[],
+    [templates],
+  );
+  const visibleTemplates = useMemo(() => {
+    const q = templateSearch.trim().toLowerCase();
+    return templates.filter(t =>
+      (categoryFilter === 'all' || t.category === categoryFilter) &&
+      (!q || [t.name, t.code, t.description, t.category].some((v: string) => v?.toLowerCase().includes(q))));
+  }, [templates, templateSearch, categoryFilter]);
 
   // ── Navigation with transitions ──
   const navigateToView = (view: StepView) => {
@@ -187,6 +218,12 @@ export function CreateRequestPage() {
     if (!selectedTemplate) { toast.error('Selecciona una plantilla'); return; }
     setSavingIndividual(true);
     try {
+      const missing = filteredVars.filter(v => !formData[v]?.toString().trim());
+      if (missing.length > 0) {
+        toast.error(`Falta completar: ${missing.slice(0, 3).map(v => v.replace(/_/g, ' ')).join(', ')}${missing.length > 3 ? ` y ${missing.length - 3} más` : ''}`);
+        setSavingIndividual(false);
+        return;
+      }
       const dataToSend = Object.fromEntries(Object.entries(formData).filter(([, v]) => v !== ''));
       if (isEditMode && originalRequestId) {
         await requestsApi.update(originalRequestId, { template_id: selectedTemplate.id, data: dataToSend });
@@ -302,85 +339,145 @@ export function CreateRequestPage() {
   );
 
   // ── TEMPLATE SELECTION ──
-  const renderTemplateSelection = () => (
-    <div className="max-w-4xl mx-auto space-y-6 md:space-y-8">
-      <div className="space-y-1">
-        <button onClick={handleBack} className="flex items-center gap-2 text-sm text-gray-500 hover:text-gray-800 transition-colors mb-3 md:mb-4 group -ml-1">
-          <ArrowLeft className="w-4 h-4 group-hover:-translate-x-1 transition-transform duration-200" />
-          <span className="group-hover:underline">Volver</span>
-        </button>
-        <h1 className="text-3xl md:text-[42px] font-bold text-slate-800 tracking-tight">Seleccionar plantilla</h1>
-        <p className="text-gray-500 text-base md:text-lg">Elige el tipo de documento que deseas solicitar</p>
-      </div>
+  const renderTemplateSelection = () => {
+    const selectedVars = selectedTemplate
+      ? extractTemplateVariables(selectedTemplate).filter((v: string) => !SYSTEM_VARS.has(v))
+      : [];
+    return (
+      <div className="max-w-5xl mx-auto space-y-6">
+        <div className="space-y-1">
+          <button onClick={handleBack} className="flex items-center gap-2 text-sm text-gray-500 hover:text-gray-800 transition-colors mb-3 group -ml-1">
+            <ArrowLeft className="w-4 h-4 group-hover:-translate-x-1 transition-transform duration-200" />
+            <span className="group-hover:underline">Volver</span>
+          </button>
+          <h1 className="text-3xl md:text-[42px] font-bold text-slate-800 tracking-tight">¿Qué documento necesitas?</h1>
+          <p className="text-gray-500 text-base md:text-lg">
+            {requestType === 'multiple' ? 'Elige la plantilla; después subirás el Excel con todos los datos.' : 'Elige la plantilla; después llenarás sus campos.'}
+          </p>
+        </div>
 
-      <div className="bg-white p-5 md:p-8 rounded-3xl shadow-sm border border-gray-100">
-        <div className="mb-5 md:mb-6 flex items-center gap-3">
-          <div className="p-2 bg-green-50 rounded-xl"><FileText className="w-5 h-5 text-green-600" /></div>
-          <div>
-            <h2 className="text-base md:text-lg font-bold text-slate-800">Tipos de documento</h2>
-            <p className="text-xs md:text-sm text-gray-500">{templates.length} plantilla{templates.length !== 1 ? 's' : ''} disponible{templates.length !== 1 ? 's' : ''}</p>
+        <div className="flex flex-col sm:flex-row gap-3">
+          <div className="relative flex-1">
+            <Search className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-400" />
+            <input
+              type="search"
+              value={templateSearch}
+              onChange={e => setTemplateSearch(e.target.value)}
+              placeholder="Buscar por nombre o código"
+              className="w-full pl-10 pr-4 py-3 rounded-xl border border-gray-200 bg-white focus:border-green-500 focus:ring-4 focus:ring-green-50 outline-none text-sm"
+            />
           </div>
+          {categories.length > 1 && (
+            <div className="flex gap-1.5 overflow-x-auto pb-1 sm:pb-0" role="tablist" aria-label="Categoría">
+              {['all', ...categories].map(c => (
+                <button
+                  key={c}
+                  role="tab"
+                  aria-selected={categoryFilter === c}
+                  onClick={() => setCategoryFilter(c)}
+                  className={`px-3.5 py-2 rounded-full text-sm whitespace-nowrap transition-colors ${categoryFilter === c ? 'bg-slate-800 text-white' : 'bg-white border border-gray-200 text-gray-600 hover:border-gray-300'}`}
+                >
+                  {c === 'all' ? 'Todas' : c}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
 
         {templates.length === 0 ? (
-          <div className="text-center py-10 md:py-16">
-            <div className="w-16 h-16 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-4"><FileText size={32} className="text-gray-300" /></div>
+          <div className="text-center py-16 bg-white rounded-2xl border border-gray-100">
+            <FileText size={32} className="text-gray-300 mx-auto mb-3" />
             <p className="text-lg font-semibold text-gray-500 mb-1">No hay plantillas disponibles</p>
             <p className="text-sm text-gray-400">Contacta al administrador para asignar plantillas</p>
           </div>
         ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 md:gap-4">
-            {templates.map((template, i) => {
-              const style = getTemplateStyle(template.category);
-              const Icon = style.icon;
-              const isSelected = selectedTemplate?.id === template.id;
-              return (
-                <div key={template.id} onClick={() => handleTemplateSelect(template)}
-                  className={`${staggerClass(i)} relative p-4 md:p-5 rounded-2xl cursor-pointer transition-all duration-300 border-2 text-left active:scale-[0.97] ${isSelected ? 'border-green-500 bg-gradient-to-br ' + style.gradient + ' shadow-lg ring-4 ring-green-500/10' : 'border-gray-100 bg-white hover:border-green-200 hover:shadow-md hover:-translate-y-0.5'}`}>
-                  <div className={`absolute top-3 right-3 md:top-4 md:right-4 transition-all duration-300 ${isSelected ? 'scale-100 rotate-0' : 'scale-0 rotate-45'}`}>
-                    <CheckCircle2 className="w-6 h-6 text-green-500 drop-shadow-sm" />
+          <div className="grid grid-cols-1 lg:grid-cols-[1fr_320px] gap-6 items-start">
+            <ul className="bg-white rounded-2xl border border-gray-100 divide-y divide-gray-100 overflow-hidden">
+              {visibleTemplates.length === 0 && (
+                <li className="p-8 text-center text-sm text-gray-500">Ninguna plantilla coincide con “{templateSearch}”.</li>
+              )}
+              {visibleTemplates.map(template => {
+                const isSelected = selectedTemplate?.id === template.id;
+                const fieldCount = extractTemplateVariables(template).filter((v: string) => !SYSTEM_VARS.has(v)).length;
+                return (
+                  <li key={template.id}>
+                    <button
+                      onClick={() => handleTemplateSelect(template)}
+                      onDoubleClick={() => { handleTemplateSelect(template); handleContinueToForm(); }}
+                      aria-pressed={isSelected}
+                      className={`w-full flex items-center gap-4 p-4 text-left transition-colors ${isSelected ? 'bg-green-50' : 'hover:bg-gray-50'}`}
+                    >
+                      <TemplateThumb config={template.config} width={72} />
+                      <span className="flex-1 min-w-0">
+                        <span className="block font-semibold text-slate-800 truncate">{template.name}</span>
+                        <span className="block text-sm text-gray-500 line-clamp-1">{template.description || template.code}</span>
+                        <span className="block text-xs text-gray-400 mt-1 tabular-nums">
+                          {fieldCount === 0 ? 'Sin campos por llenar' : `${fieldCount} campo${fieldCount !== 1 ? 's' : ''}`}
+                          {template.category ? ` · ${template.category}` : ''}
+                        </span>
+                      </span>
+                      <span className={`w-5 h-5 rounded-full border-2 flex items-center justify-center shrink-0 transition-colors ${isSelected ? 'border-green-600 bg-green-600' : 'border-gray-300'}`}>
+                        {isSelected && <CheckCircle2 className="w-4 h-4 text-white" />}
+                      </span>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+
+            <aside className="lg:sticky lg:top-6 bg-white rounded-2xl border border-gray-100 p-5">
+              {selectedTemplate ? (
+                <div className="space-y-4">
+                  <div className="flex justify-center bg-gray-50 rounded-xl py-5">
+                    <TemplateThumb config={selectedTemplate.config} width={200} />
                   </div>
-                  <div className="flex items-start gap-3 md:gap-4">
-                    <div className={`p-2.5 md:p-3 rounded-xl ${style.bgColor} ${style.color} transition-transform duration-300 ${isSelected ? 'scale-110' : 'group-hover:scale-105'}`}>
-                      <Icon className="w-7 h-7 md:w-8 md:h-8" />
-                    </div>
-                    <div className="flex-1 min-w-0 pr-6">
-                      <h3 className={`font-semibold mb-1 text-sm md:text-base ${isSelected ? 'text-green-900' : 'text-slate-800'}`}>{template.name}</h3>
-                      <p className={`text-xs md:text-sm leading-relaxed line-clamp-2 ${isSelected ? 'text-green-700/70' : 'text-gray-500'}`}>
-                        {template.description || template.code || 'Certificado disponible'}
-                      </p>
-                      {template.category && (
-                        <span className="inline-block mt-2 text-[10px] md:text-xs font-medium text-gray-400 bg-gray-100 px-2 py-0.5 rounded-full">{template.category}</span>
-                      )}
-                    </div>
+                  <div>
+                    <h2 className="font-bold text-slate-800">{selectedTemplate.name}</h2>
+                    <p className="text-xs text-gray-400 mt-0.5">
+                      {getPageSizeLabel(normalizePageSize(selectedTemplate.config?.pageSize))} · {selectedTemplate.config?.orientation === 'portrait' ? 'vertical' : 'horizontal'}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-xs font-semibold text-gray-500 mb-1.5">Datos que se piden</p>
+                    {selectedVars.length === 0 ? (
+                      <p className="text-sm text-gray-500">Ninguno, el documento se genera tal cual.</p>
+                    ) : (
+                      <ul className="text-sm text-slate-700 space-y-0.5 max-h-40 overflow-y-auto">
+                        {selectedVars.map((v: string) => <li key={v} className="capitalize">{v.replace(/_/g, ' ')}</li>)}
+                      </ul>
+                    )}
                   </div>
                 </div>
-              );
-            })}
+              ) : (
+                <p className="text-sm text-gray-500 py-8 text-center">Selecciona una plantilla para ver su vista previa y los datos que pide.</p>
+              )}
+            </aside>
           </div>
         )}
-      </div>
 
-      {/* Bottom actions - sticky on mobile */}
-      <div className="flex flex-col-reverse sm:flex-row items-stretch sm:items-center justify-end gap-3 pt-2 pb-4 md:pb-0">
-        <button onClick={handleBack} className="px-5 py-3 rounded-xl text-gray-600 font-medium hover:bg-gray-100 active:bg-gray-200 transition-colors border border-gray-200 bg-white text-sm md:text-base">Cancelar</button>
-        <button disabled={!selectedTemplate} onClick={handleContinueToForm}
-          className={`flex items-center justify-center gap-2 px-6 md:px-8 py-3 rounded-xl font-medium transition-all duration-300 text-sm md:text-base ${selectedTemplate ? 'bg-green-500 text-white hover:bg-green-600 hover:shadow-lg active:scale-[0.97]' : 'bg-gray-100 text-gray-400 cursor-not-allowed'}`}>
-          Continuar <ChevronRight className="w-4 h-4 md:w-5 md:h-5" />
-        </button>
+        <div className="flex flex-col-reverse sm:flex-row items-stretch sm:items-center justify-end gap-3 pt-2 pb-4">
+          <button onClick={handleBack} className="px-5 py-3 rounded-xl text-gray-600 font-medium hover:bg-gray-100 transition-colors border border-gray-200 bg-white text-sm md:text-base">Cancelar</button>
+          <button disabled={!selectedTemplate} onClick={handleContinueToForm}
+            className={`flex items-center justify-center gap-2 px-8 py-3 rounded-xl font-medium transition-all duration-200 text-sm md:text-base ${selectedTemplate ? 'bg-green-600 text-white hover:bg-green-700 active:scale-[0.97]' : 'bg-gray-100 text-gray-400 cursor-not-allowed'}`}>
+            Continuar <ChevronRight className="w-4 h-4 md:w-5 md:h-5" />
+          </button>
+        </div>
       </div>
-    </div>
-  );
+    );
+  };
 
   // ── SINGLE FORM ──
   const renderSingleForm = () => (
-    <div className="bg-white p-5 md:p-8 rounded-3xl shadow-sm border border-gray-100 animate-[slideUp_0.4s_ease-out_forwards]">
+    <form onSubmit={handleIndividualSubmit} noValidate className="bg-white p-5 md:p-8 rounded-3xl shadow-sm border border-gray-100 animate-[slideUp_0.4s_ease-out_forwards]">
       <div className="mb-6 md:mb-8 flex items-center gap-3 border-b border-gray-100 pb-5 md:pb-6">
-        <div className="p-2 bg-green-50 rounded-xl"><FileText className="w-5 h-5 text-green-600" /></div>
+        <TemplateThumb config={selectedTemplate?.config} width={44} />
         <div>
           <h2 className="text-base md:text-lg font-bold text-slate-800">Datos del certificado</h2>
           <p className="text-xs md:text-sm text-gray-500">
             Completa la información para <span className="font-semibold text-green-600">{selectedTemplate?.name}</span>
+            {filteredVars.length > 0 && (
+              <span className="tabular-nums"> · {filteredVars.filter(v => formData[v]?.toString().trim()).length} de {filteredVars.length} completos</span>
+            )}
           </p>
         </div>
       </div>
@@ -395,7 +492,7 @@ export function CreateRequestPage() {
         <div className="grid grid-cols-1 md:grid-cols-2 gap-x-5 md:gap-x-6 gap-y-4 md:gap-y-5">
           {filteredVars.map((variable, i) => (
             <div key={variable} className={staggerClass(i)}>
-              <label className="block text-sm font-semibold text-slate-700 mb-2 capitalize">{variable.replace(/_/g, ' ')}</label>
+              <label className="block text-sm font-semibold text-slate-700 mb-2 capitalize">{variable.replace(/_/g, ' ')} <span className="text-red-500" aria-hidden>*</span></label>
               {['fecha', 'date'].includes(variable) || variable.toLowerCase().includes('fecha') ? (
                 <input type="date"
                   className="w-full p-3 md:p-3.5 rounded-xl border border-gray-200 focus:border-green-500 focus:ring-4 focus:ring-green-50 outline-none transition-all text-slate-600 text-sm md:text-base"
@@ -417,7 +514,8 @@ export function CreateRequestPage() {
           ))}
         </div>
       )}
-    </div>
+      <button type="submit" className="hidden" aria-hidden tabIndex={-1} />
+    </form>
   );
 
   // ── MULTIPLE UPLOAD ──

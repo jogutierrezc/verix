@@ -1,0 +1,140 @@
+@import url('https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=Public+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap');
+
+/*
+ * Portal público de verificación.
+ * Mundo: registro oficial sobre papel. Papel cálido, tinta verde casi negra,
+ * un sello como único acento y rojo bermellón solo para lo revocado.
+ */
+.portal {
+  --paper: #f2ede1;
+  --paper-deep: #e8e0cf;
+  --sheet: #fbf8f1;
+  --ink: #17251d;
+  --ink-soft: #55625a;
+  --rule: #cdc4ae;
+  --seal: #1d6a3b;
+  --seal-wash: #dcebdc;
+  --revoked: #a8341f;
+  --revoked-wash: #f1dcd4;
+  --pending: #2f4b6e;
+  --pending-wash: #dce4ee;
+
+  min-height: 100vh;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: 'Public Sans', system-ui, sans-serif;
+  font-size: 16px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  scrollbar-color: var(--rule) transparent;
+}
+
+.portal ::selection { background: var(--seal); color: #fff; }
+.portal :focus-visible { outline: 2px solid var(--seal); outline-offset: 3px; border-radius: 2px; }
+.portal a { color: inherit; }
+
+.portal .display {
+  font-family: 'Newsreader', Georgia, serif;
+  font-optical-sizing: auto;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  line-height: 1.04;
+  text-wrap: balance;
+}
+.portal .mono {
+  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+  font-size: 0.875em;
+}
+.portal .num { font-variant-numeric: tabular-nums; }
+
+/* Campo de libro de registro: solo una línea de tinta */
+.portal .ledger-input {
+  width: 100%;
+  background: transparent;
+  border: 0;
+  border-bottom: 1.5px solid var(--ink);
+  border-radius: 0;
+  padding: 0.6rem 0;
+  font-family: 'Newsreader', Georgia, serif;
+  font-size: clamp(1.5rem, 3.2vw, 2.1rem);
+  letter-spacing: -0.01em;
+  color: var(--ink);
+  outline: none;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+.portal .ledger-input::placeholder { color: color-mix(in srgb, var(--ink) 35%, transparent); }
+.portal .ledger-input:focus { border-bottom-color: var(--seal); box-shadow: 0 2px 0 var(--seal); }
+
+.portal .btn-ink {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.6rem;
+  background: var(--ink);
+  color: var(--sheet);
+  padding: 0.85rem 1.6rem;
+  font-weight: 600;
+  font-size: 0.95rem;
+  border: 0;
+  border-radius: 2px;
+  cursor: pointer;
+  transition: background-color 0.18s, transform 0.12s;
+}
+.portal .btn-ink:hover:not(:disabled) { background: var(--seal); }
+.portal .btn-ink:active:not(:disabled) { transform: scale(0.97); }
+.portal .btn-ink:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.portal .btn-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.7rem 1.2rem;
+  border: 1.5px solid var(--ink);
+  background: transparent;
+  color: var(--ink);
+  font-weight: 600;
+  font-size: 0.9rem;
+  border-radius: 2px;
+  cursor: pointer;
+  transition: background-color 0.18s, color 0.18s, transform 0.12s;
+}
+.portal .btn-line:hover { background: var(--ink); color: var(--sheet); }
+.portal .btn-line:active { transform: scale(0.97); }
+
+/* Lista de registro */
+.portal .ledger-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0.25rem 1.5rem;
+  align-items: baseline;
+  padding: 1.1rem 0;
+  border-top: 1px solid var(--rule);
+  text-decoration: none;
+  transition: background-color 0.18s, padding 0.25s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.portal .ledger-row:last-child { border-bottom: 1px solid var(--rule); }
+.portal .ledger-row:hover { background: color-mix(in srgb, var(--sheet) 70%, transparent); padding-left: 0.75rem; padding-right: 0.75rem; }
+
+/* Definición tipo ficha */
+.portal dl.facts { display: grid; grid-template-columns: minmax(7rem, 9.5rem) 1fr; margin: 0; }
+.portal dl.facts dt,
+.portal dl.facts dd { padding: 0.7rem 0; border-top: 1px solid var(--rule); margin: 0; }
+.portal dl.facts dt { color: var(--ink-soft); font-size: 0.8125rem; padding-right: 1rem; }
+.portal dl.facts dd { font-weight: 500; overflow-wrap: anywhere; }
+
+.portal .tone-valid { color: var(--seal); }
+.portal .tone-revoked { color: var(--revoked); }
+.portal .tone-pending { color: var(--pending); }
+.portal .tone-neutral { color: var(--ink-soft); }
+
+.portal .paper-sheet {
+  background: var(--sheet);
+  box-shadow: 0 1px 1px rgba(23, 37, 29, 0.1), 0 10px 28px -6px rgba(23, 37, 29, 0.28);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .portal * { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
+}
+
+@keyframes portal-scan { 0% { transform: translateX(-100%); } 100% { transform: translateX(300%); } }

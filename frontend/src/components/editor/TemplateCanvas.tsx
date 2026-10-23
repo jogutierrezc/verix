@@ -1,7 +1,8 @@
 import React, { useState, useRef } from 'react';
 import { Trash2, Type, Image, QrCode, Hash, Calendar, Signature, Square, Minus, Upload, Plus, Copy } from 'lucide-react';
 import toast from 'react-hot-toast';
-import { getPageDimensions, PageSizeName } from '../../lib/pageSizes';
+import { getPageDimensions, PAGE_SIZES, normalizePageSize, DEFAULT_PAGE_SIZE, PageSizeName } from '../../lib/pageSizes';
+import { RichText, templateTextStyle } from '../../lib/richText';
 
 export interface TemplateElement {
   id: string;
@@ -69,7 +70,7 @@ export function TemplateCanvas({
   elements,
   onChange,
   pageOrientation = 'portrait',
-  pageSize = 'A4',
+  pageSize = DEFAULT_PAGE_SIZE,
   activePage = 0,
   onActivePageChange,
   onImageUpload,
@@ -81,11 +82,15 @@ export function TemplateCanvas({
   const dragRef = useRef<{ id: string; offsetX: number; offsetY: number; startX: number; startY: number; moved: boolean } | null>(null);
   const resizeRef = useRef<{ id: string; startX: number; startY: number; startW: number; startH: number } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const elementsRef = useRef(elements);
+  elementsRef.current = elements;
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState('');
 
   const { width, height } = getPageDimensions(pageSize, pageOrientation);
   const scale = 0.6;
+  const sizeLabel = PAGE_SIZES[normalizePageSize(pageSize)].label;
+  const inches = (pt: number) => (pt / 72).toFixed(pt % 72 === 0 ? 0 : 1);
 
   // Get elements for current page only
   const pageElements = elements.filter(el => (el.page ?? 0) === activePage);
@@ -159,8 +164,9 @@ export function TemplateCanvas({
         height: 80,
         content: file.name,
         imageUrl: url,
+        page: safeActivePage,
       };
-      onChange([...elements, newElement]);
+      onChange([...elementsRef.current, newElement]);
       onSelectElement?.(newElement);
       toast.success('Logo agregado al canvas');
     } catch (err: any) {
@@ -184,8 +190,10 @@ export function TemplateCanvas({
     if (selectedElementId === id) selectElement(null);
   };
 
+  // Usa la referencia más reciente: los listeners de arrastre/redimensión viven
+  // más que un render y, con el array capturado, pisaban cambios recientes.
   const updateElement = (id: string, updates: Partial<TemplateElement>) => {
-    onChange(elements.map(el => (el.id === id ? { ...el, ...updates } : el)));
+    onChange(elementsRef.current.map(el => (el.id === id ? { ...el, ...updates } : el)));
   };
 
   // --- DRAG ---
@@ -219,8 +227,11 @@ export function TemplateCanvas({
       if (!dragRef.current.moved && (dx < 5 && dy < 5)) return;
       dragRef.current.moved = true;
 
-      const newX = Math.max(0, e.clientX / scale - dragRef.current.offsetX);
-      const newY = Math.max(0, e.clientY / scale - dragRef.current.offsetY);
+      const moving = elementsRef.current.find(el => el.id === dragRef.current!.id);
+      const maxX = Math.max(0, width - (moving?.width ?? 0));
+      const maxY = Math.max(0, height - (moving?.height ?? 0));
+      const newX = Math.min(maxX, Math.max(0, e.clientX / scale - dragRef.current.offsetX));
+      const newY = Math.min(maxY, Math.max(0, e.clientY / scale - dragRef.current.offsetY));
       updateElement(dragRef.current.id, { x: newX, y: newY });
     };
 
@@ -329,10 +340,8 @@ export function TemplateCanvas({
           }`}
           style={{
             fontSize: (el.fontSize || 14) * scale,
-            fontWeight: el.bold ? 'bold' : 'normal',
-            fontStyle: el.italic ? 'italic' : 'normal',
-            textAlign: el.align || 'left',
             color: el.color || '#3d4a3d',
+            fontFamily: 'Roboto, Helvetica, Arial, sans-serif',
             overflow: 'hidden',
           }}
         >
@@ -365,16 +374,11 @@ export function TemplateCanvas({
               className="w-full h-full bg-transparent resize-none outline-none p-1 leading-tight"
               style={{
                 fontSize: (el.fontSize || 14) * scale,
-                fontWeight: el.bold ? 'bold' : 'normal',
+                fontWeight: el.bold ? 700 : 400,
                 fontStyle: el.italic ? 'italic' : 'normal',
-                textAlign: el.align || 'left',
                 color: el.color || '#3d4a3d',
-                fontFamily: el.fontFamily || 'inherit',
                 overflow: 'auto',
-                wordWrap: 'break-word',
-                overflowWrap: 'break-word',
-                whiteSpace: 'pre-wrap',
-                wordBreak: 'break-word',
+                ...templateTextStyle(el.align),
               }}
               value={editValue}
               onChange={(e) => setEditValue(e.target.value)}
@@ -395,18 +399,9 @@ export function TemplateCanvas({
           ) : (
             <div
               className="w-full h-full p-1 leading-tight"
-              style={{
-                overflow: 'hidden',
-                wordWrap: 'break-word',
-                overflowWrap: 'break-word',
-                whiteSpace: 'pre-wrap',
-                wordBreak: 'break-word',
-                display: '-webkit-box',
-                WebkitLineClamp: '999',
-                WebkitBoxOrient: 'vertical',
-              }}
+              style={{ overflow: 'hidden', ...templateTextStyle(el.align) }}
             >
-              {el.content}
+              <RichText content={el.content} bold={el.bold} italic={el.italic} />
             </div>
           )}
         </div>
@@ -466,9 +461,16 @@ export function TemplateCanvas({
         ref={canvasRef}
         onClick={handleCanvasClick}
       >
+        <p className="mx-auto mb-2 text-center text-[11px] text-on-surface-variant/70 tabular-nums">
+          {sizeLabel} · {inches(width)} × {inches(height)} in · {pageOrientation === 'landscape' ? 'horizontal' : 'vertical'}
+        </p>
         <div
-          className="mx-auto bg-white shadow-xl rounded-sm overflow-hidden relative"
-          style={{ width: width * scale, height: height * scale }}
+          className="mx-auto bg-white overflow-hidden relative ring-1 ring-black/15"
+          style={{
+            width: width * scale,
+            height: height * scale,
+            boxShadow: '0 1px 2px rgba(0,0,0,0.08), 0 12px 32px rgba(0,0,0,0.12)',
+          }}
         >
           <div
             className="absolute inset-0 opacity-[0.02] pointer-events-none"
@@ -547,9 +549,9 @@ export function TemplateCanvas({
             </>
           )}
 
-          {elements.map(renderElement)}
+          {pageElements.map(renderElement)}
 
-          {elements.length === 0 && (
+          {pageElements.length === 0 && (
             <div className="absolute inset-0 flex items-center justify-center text-on-surface-variant/40">
               <div className="text-center">
                 <p className="text-body-lg font-medium">Plantilla vacía</p>
