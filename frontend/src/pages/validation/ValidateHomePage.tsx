@@ -22,6 +22,13 @@ function asDocumentNumber(input: string): string | null {
   return /^\d{5,15}$/.test(digits) ? digits : null;
 }
 
+/** Dos o más palabras solo con letras ("María Pérez") → búsqueda por nombre. */
+function asPersonName(input: string): string | null {
+  const name = input.trim().replace(/\s+/g, ' ');
+  const words = name.split(' ').filter((w) => w.length >= 2);
+  return /^[\p{L}\s.'-]+$/u.test(name) && words.length >= 2 ? name : null;
+}
+
 const formatDate = (iso: string | null) =>
   iso ? new Date(iso).toLocaleDateString('es-CO', { day: 'numeric', month: 'long', year: 'numeric' }) : '—';
 
@@ -34,6 +41,7 @@ export function ValidateHomePage() {
   const [searching, setSearching] = useState(false);
   const [results, setResults] = useState<FoundCertificate[] | null>(null);
   const [searchedDoc, setSearchedDoc] = useState('');
+  const [searchedKind, setSearchedKind] = useState<'doc' | 'name'>('doc');
   const [error, setError] = useState<string | null>(null);
 
   // Un solo momento coreografiado: el sello se estampa sobre el espécimen.
@@ -66,25 +74,33 @@ export function ValidateHomePage() {
     setResults(null);
 
     const doc = asDocumentNumber(value);
-    if (!doc) {
+    const name = doc ? null : asPersonName(value);
+    if (!doc && !name) {
       navigate(`/validate/${encodeURIComponent(value)}`);
       return;
     }
 
     setSearching(true);
     try {
-      const { data, error: rpcError } = await supabase.rpc('search_certificates_by_document', { p_document: doc });
+      const { data, error: rpcError } = doc
+        ? await supabase.rpc('search_certificates_by_document', { p_document: doc })
+        : await supabase.rpc('search_certificates_by_name', { p_name: name });
       if (rpcError) {
-        // Migración sin aplicar: se conserva la búsqueda anterior (un resultado)
-        navigate(`/validate/${encodeURIComponent(doc)}`);
-        return;
+        if (doc) {
+          // Migración sin aplicar: se conserva la búsqueda anterior (un resultado)
+          navigate(`/validate/${encodeURIComponent(doc)}`);
+          return;
+        }
+        throw rpcError;
       }
       const list: FoundCertificate[] = Array.isArray(data) ? data : [];
-      if (list.length === 1) {
+      // Un documento identifica a una persona; un nombre puede repetirse, así que siempre se lista
+      if (doc && list.length === 1) {
         navigate(`/validate/${encodeURIComponent(list[0].verification_code)}`);
         return;
       }
-      setSearchedDoc(doc);
+      setSearchedKind(doc ? 'doc' : 'name');
+      setSearchedDoc(doc || name!);
       setResults(list);
       if (list.length > 0) animateResults();
     } catch {
@@ -113,20 +129,20 @@ export function ValidateHomePage() {
               Compruebe que un certificado es auténtico.
             </h1>
             <p data-rise className="mt-6 max-w-[52ch] text-lg text-[var(--ink-soft)]">
-              Escriba el número de documento del estudiante, el código impreso en el certificado o su radicado.
+              Escriba el número de documento o el nombre completo del estudiante, el código impreso en el certificado o su radicado.
               Le mostraremos si fue expedido y sigue vigente.
             </p>
 
             <form data-rise onSubmit={handleSubmit} className="mt-10 max-w-xl">
               <label htmlFor="lookup" className="block text-sm font-semibold mb-1">
-                Documento, código o radicado
+                Documento, nombre, código o radicado
               </label>
               <input
                 id="lookup"
                 className="ledger-input"
                 value={query}
                 onChange={(e) => { setQuery(e.target.value); if (results) setResults(null); }}
-                placeholder="1094852114"
+                placeholder="1094852114 o María Pérez"
                 autoComplete="off"
                 autoCapitalize="characters"
                 spellCheck={false}
@@ -152,16 +168,18 @@ export function ValidateHomePage() {
                 <div data-result>
                   <p className="display text-2xl">Sin resultados para {searchedDoc}.</p>
                   <p className="mt-2 text-[var(--ink-soft)]">
-                    Verifique que escribió el número completo, sin letras. Si el documento es correcto, es posible que
-                    el certificado aún no haya sido aprobado; consulte con la institución que lo emitió.
+                    {searchedKind === 'name'
+                      ? 'Escriba nombre y apellido tal como figuran en el certificado; las tildes no importan. '
+                      : 'Verifique que escribió el número completo, sin letras. '}
+                    Si el dato es correcto, es posible que el certificado aún no haya sido aprobado; consulte con la institución que lo emitió.
                   </p>
                 </div>
               )}
 
-              {results && results.length > 1 && (
+              {results && results.length > 0 && (
                 <div>
                   <p data-result className="text-sm text-[var(--ink-soft)] mb-3 num">
-                    {results.length} certificados para el documento {searchedDoc}
+                    {results.length} certificado{results.length !== 1 ? 's' : ''} para {searchedKind === 'doc' ? `el documento ${searchedDoc}` : `“${searchedDoc}”`}
                   </p>
                   {results.map((c) => {
                     const revoked = c.status === 'REVOKED';

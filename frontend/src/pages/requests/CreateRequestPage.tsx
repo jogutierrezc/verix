@@ -4,7 +4,7 @@ import { useAuth } from '../../hooks/useAuth';
 import { supabase } from '../../lib/supabase';
 import {
   ArrowLeft, Save, FileText, Upload, Table, AlertCircle, CheckCircle, Download,
-  FileBadge, GraduationCap, Award, ScrollText, ChevronRight, FileUp, CheckCircle2, Search
+  ChevronRight, FileUp, CheckCircle2, Search
 } from 'lucide-react';
 import { requestsApi, auditApi, getClientIP } from '../../services/api';
 import toast from 'react-hot-toast';
@@ -17,23 +17,6 @@ export const SYSTEM_VARS = new Set(['codigo', 'codigo_certificado', 'radicado', 
 
 type CreationType = 'single' | 'multiple';
 type StepView = 'TYPE_SELECTION' | 'TEMPLATE_SELECTION' | 'ACTION_AREA';
-
-const templateStyleMap: Record<string, { icon: any; color: string; bgColor: string; gradient: string }> = {
-  notas: { icon: FileBadge, color: 'text-blue-500', bgColor: 'bg-blue-50', gradient: 'from-blue-500/10 to-blue-600/5' },
-  constancia: { icon: GraduationCap, color: 'text-emerald-500', bgColor: 'bg-emerald-50', gradient: 'from-emerald-500/10 to-emerald-600/5' },
-  diploma: { icon: Award, color: 'text-amber-500', bgColor: 'bg-amber-50', gradient: 'from-amber-500/10 to-amber-600/5' },
-  acta: { icon: ScrollText, color: 'text-purple-500', bgColor: 'bg-purple-50', gradient: 'from-purple-500/10 to-purple-600/5' },
-  default: { icon: FileText, color: 'text-green-500', bgColor: 'bg-green-50', gradient: 'from-green-500/10 to-green-600/5' },
-};
-
-const getTemplateStyle = (category: string | null) => {
-  if (!category) return templateStyleMap.default;
-  const key = category.toLowerCase();
-  for (const [k, v] of Object.entries(templateStyleMap)) {
-    if (key.includes(k)) return v;
-  }
-  return templateStyleMap.default;
-};
 
 export const extractTemplateVariables = (template: any): string[] => {
   if (template?.config && Array.isArray(template.config.elements)) {
@@ -284,9 +267,26 @@ export function CreateRequestPage() {
         const data = new Uint8Array(evt.target?.result as ArrayBuffer);
         const workbook = XLSX.read(data, { type: 'array', cellDates: true });
         const sheet = workbook.Sheets[workbook.SheetNames[0]];
-        const json = XLSX.utils.sheet_to_json<Record<string, string>>(sheet, { raw: false, defval: '' });
-        if (json.length === 0) { toast.error('Archivo vacío'); return; }
-        const columns = Object.keys(json[0]);
+        const rows = (XLSX.utils.sheet_to_json<any[]>(sheet, { header: 1, raw: false, defval: '' }) as any[][])
+          .filter(r => r.some(c => String(c).trim() !== ''));
+        if (rows.length === 0) { toast.error('Archivo vacío'); return; }
+
+        // Si la primera fila trae una cédula (6+ dígitos) no son encabezados sino el primer
+        // estudiante: antes se usaba como nombres de columna y esa persona se perdía.
+        const first = rows[0].map(c => String(c).trim());
+        const noHeaders = first.some(c => /^\d{6,}$/.test(c));
+        const seen = new Map<string, number>();
+        const columns = first.map((c, i) => {
+          const base = noHeaders || !c ? `Columna ${i + 1}` : c;
+          const n = (seen.get(base) || 0) + 1;
+          seen.set(base, n);
+          return n > 1 ? `${base} (${n})` : base;
+        });
+        const body = noHeaders ? rows : rows.slice(1);
+        const json: Record<string, string>[] = body.map(r =>
+          Object.fromEntries(columns.map((c, i) => [c, String(r[i] ?? '')])));
+        if (json.length === 0) { toast.error('El archivo solo tiene encabezados'); return; }
+        if (noHeaders) toast('El archivo no tiene fila de encabezados: se tomó la primera fila como dato. Asigna cada columna a su campo.', { icon: 'ℹ️', duration: 6000 });
         setExcelColumns(columns); setExcelData(json);
         if (filteredVars.length > 0) {
           const mapping: Record<string, string> = {};
