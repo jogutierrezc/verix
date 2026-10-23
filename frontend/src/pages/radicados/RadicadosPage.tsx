@@ -1,4 +1,5 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
+import { useStagger } from '../../lib/motion';
 import { createPortal } from 'react-dom';
 import { useAuth } from '../../hooks/useAuth';
 import { supabase } from '../../lib/supabase';import { Plus, Search, Hash, Trash2, Edit3, Building2, Layers, X, FileText
@@ -16,6 +17,7 @@ export function RadicadosPage() {
   const [dependencies, setDependencies] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
+  const gridRef = useRef<HTMLDivElement>(null);
   const [showModal, setShowModal] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState({
@@ -243,6 +245,8 @@ export function RadicadosPage() {
     r.institution?.name?.toLowerCase().includes(search.toLowerCase())
   );
 
+  useStagger(gridRef, loading ? 'loading' : filtered.map(r => r.id).join(','), !loading);
+
   const formatPreview = (r: any) => {
     const year = new Date().getFullYear();
     return r.format
@@ -270,8 +274,16 @@ export function RadicadosPage() {
         <div className="flex items-center gap-2">
           <div className="relative">
             <Search size={16} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-on-surface-variant/50" />
-            <input type="text" placeholder="Buscar..." className="input pl-10 w-48"
-              value={search} onChange={e => setSearch(e.target.value)} />
+            <input type="search" placeholder="Nombre, código o institución" aria-label="Buscar radicados"
+              className="input pl-10 pr-9 w-64 [&::-webkit-search-cancel-button]:hidden"
+              value={search} onChange={e => setSearch(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Escape') setSearch(''); }} />
+            {search && (
+              <button onClick={() => setSearch('')} aria-label="Limpiar búsqueda"
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 rounded-md text-on-surface-variant/60 hover:text-on-surface hover:bg-surface-container-high transition-colors">
+                <X size={14} />
+              </button>
+            )}
           </div>
           <button onClick={openCreate} className="btn-primary btn-sm">
             <Plus size={16} /> Nuevo radicado
@@ -280,20 +292,28 @@ export function RadicadosPage() {
       </div>
 
       {/* Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+      <div ref={gridRef} className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
         {loading ? (
           <SkeletonCard variant="card-sm" count={3} />
         ) : filtered.length === 0 ? (
           <div className="col-span-full text-center py-16">
             <Hash size={48} className="mx-auto text-surface-variant mb-4" />
-            <p className="text-headline-md font-headline-md text-on-surface-variant mb-1">No hay radicados</p>
-            <p className="text-body-md text-on-surface-variant/60">Crea un radicado para comenzar a gestionar secuencias</p>
-            <button onClick={openCreate} className="btn-primary mt-6">
-              <Plus size={16} /> Crear radicado
-            </button>
+            <p className="text-headline-md font-headline-md text-on-surface-variant mb-1">
+              {search ? `Ningún radicado coincide con “${search}”` : 'No hay radicados'}
+            </p>
+            <p className="text-body-md text-on-surface-variant/60">
+              {search ? 'Revisa el nombre o prueba con el código.' : 'Crea un radicado para comenzar a gestionar secuencias'}
+            </p>
+            {search ? (
+              <button onClick={() => setSearch('')} className="btn-secondary mt-6">Quitar búsqueda</button>
+            ) : (
+              <button onClick={openCreate} className="btn-primary mt-6">
+                <Plus size={16} /> Crear radicado
+              </button>
+            )}
           </div>
         ) : filtered.map((r) => (
-          <div key={r.id} className="glass-card p-5 rounded-2xl hover:shadow-lg transition-all group border border-white/40">
+          <div key={r.id} data-stagger className="glass-card p-5 rounded-2xl [@media(hover:hover)]:hover:shadow-lg transition-shadow duration-200 group border border-white/40">
             <div className="flex items-start justify-between mb-3">
               <div className="w-10 h-10 bg-primary/10 rounded-xl flex items-center justify-center">
                 <Hash size={20} className="text-primary" />

@@ -581,6 +581,7 @@ export function CertificatePreview({
   const certificateRef = useRef<HTMLDivElement>(null);
 
   // Radicado
+  const [correctionNote, setCorrectionNote] = useState<{ text: string; at: string } | null>(null);
   const [generatedRadicado, setGeneratedRadicado] = useState<{ id: string; code: string; number: number } | null>(null);
   const [radicadoLoading, setRadicadoLoading] = useState(false);
 
@@ -612,6 +613,22 @@ export function CertificatePreview({
       if (tmplErr) throw tmplErr;
 
       setRequest(req);
+
+      // Si un administrador corrigió la solicitud, mostrar al firmante qué cambió
+      setCorrectionNote(null);
+      if (req.status === 'PENDING' || req.status === 'IN_REVIEW') {
+        const { data: log } = await supabase
+          .from('audit_logs')
+          .select('description, created_at')
+          .eq('entity_id', requestId)
+          .eq('action', 'correct')
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        if (log?.description) {
+          setCorrectionNote({ text: log.description.replace(/^Corrección del administrador[^:]*:\s*/, ''), at: log.created_at });
+        }
+      }
       const baseConfig = typeof tmpl?.config === 'string' ? safeJsonParse(tmpl.config) : (tmpl?.config || {});
       setTemplateConfig({
         ...baseConfig,
@@ -1233,6 +1250,16 @@ export function CertificatePreview({
             </div>
           ) : (
             <>
+              {correctionNote && (
+                <div className="rounded-xl bg-amber-50 border border-amber-200 px-4 py-3 text-sm text-amber-900">
+                  <p className="font-semibold">Corregida por un administrador</p>
+                  <p className="mt-0.5">{correctionNote.text}</p>
+                  <p className="mt-1 text-xs text-amber-700/80">
+                    {new Date(correctionNote.at).toLocaleString('es-CO', { day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' })}. Revisa los datos antes de aprobar.
+                  </p>
+                </div>
+              )}
+
               {/* Request info */}
               <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
                 <div>

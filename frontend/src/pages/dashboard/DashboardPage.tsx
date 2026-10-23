@@ -1,8 +1,9 @@
-import { useState, useEffect, useMemo, useCallback } from 'react';
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { useStagger, useCountUp } from '../../lib/motion';
 import { useAuth } from '../../hooks/useAuth';
 import { Link } from 'react-router-dom';
 import { supabase } from '../../lib/supabase';
-import { FileText, CheckCircle, XCircle, Clock, Plus, TrendingUp, TrendingDown, Building2, Activity, Layout } from 'lucide-react';
+import { FileText, CheckCircle, XCircle, Clock, Plus, TrendingUp, TrendingDown, Building2, Activity, Layout, ArrowRight } from 'lucide-react';
 import { format, subWeeks, subMonths, eachDayOfInterval, eachWeekOfInterval, eachMonthOfInterval, differenceInHours } from 'date-fns';
 import { es } from 'date-fns/locale';
 import { SkeletonCard } from '../../components/ui/SkeletonCard';
@@ -104,11 +105,16 @@ const ChartTooltip = ({ active, payload, label }: any) => {
 };
 
 // ── Mini stat card ──
-function StatCard({ icon: Icon, label, value, trend, trendUp, color }: {
-  icon: any; label: string; value: string | number; trend?: string; trendUp?: boolean; color: string;
+function StatCard({ icon: Icon, label, value, trend, trendUp, color, to }: {
+  icon: any; label: string; value: string | number; trend?: string; trendUp?: boolean; color: string; to?: string;
 }) {
+  const isNumber = typeof value === 'number';
+  const counted = useCountUp(isNumber ? value : 0, isNumber);
+  const shown = isNumber ? counted : value;
+  const className = `glass-card p-4 rounded-2xl flex flex-col gap-2.5 active:scale-[0.98] transition-transform duration-150 ease-out ${to ? '[@media(hover:hover)]:hover:-translate-y-0.5 cursor-pointer' : ''}`;
+  const Wrapper: any = to ? Link : 'div';
   return (
-    <div className="glass-card p-4 rounded-2xl flex flex-col gap-2.5 active:scale-[0.98] transition-transform duration-200">
+    <Wrapper {...(to ? { to } : {})} data-stagger className={className}>
       <div className="flex items-center justify-between">
         <div className="w-9 h-9 rounded-xl flex items-center justify-center" style={{ backgroundColor: `${color}15` }}>
           <Icon size={20} style={{ color }} />
@@ -121,10 +127,10 @@ function StatCard({ icon: Icon, label, value, trend, trendUp, color }: {
         )}
       </div>
       <div>
-        <span className="text-headline-sm font-headline-sm block leading-none">{value}</span>
+        <span className="text-headline-sm font-headline-sm block leading-none tabular-nums">{shown}</span>
         <span className="text-label-sm font-label-sm text-on-surface-variant">{label}</span>
       </div>
-    </div>
+    </Wrapper>
   );
 }
 
@@ -134,6 +140,7 @@ export function DashboardPage() {
   const isApplicant = user?.role === 'APPLICANT';
 
   // ── State ──
+  const statsRef = useRef<HTMLElement>(null);
   const [loading, setLoading] = useState(true);
   const [period, setPeriod] = useState<TimePeriod>('month');
   const [allRequests, setAllRequests] = useState<any[]>([]);
@@ -441,13 +448,15 @@ export function DashboardPage() {
     REVOKED: { label: 'Revocado', color: 'text-on-surface-variant', bg: 'bg-surface-variant' },
   };
 
+  useStagger(statsRef, loading ? 'loading' : period, !loading);
+
   // ── Render ──
   return (
     <div className="max-w-7xl mx-auto space-y-6 animate-fade-in">
       {/* Greeting */}
       <section>
         <h1 className="text-headline-lg-mobile md:text-headline-lg font-headline-lg text-on-surface">
-          {isApplicant ? `Hola, ${user?.first_name || 'Usuario'} 👋` : 'Panel de Analítica 📊'}
+          {isApplicant ? `Hola, ${user?.first_name || 'Usuario'}` : 'Panel de analítica'}
         </h1>
         <p className="text-body-md font-body-md text-on-surface-variant mt-1">
           {isApplicant
@@ -457,14 +466,14 @@ export function DashboardPage() {
       </section>
 
       {/* Stats + Period Selector */}
-      <section className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+      <section ref={statsRef} className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-3 flex-1">
-          <StatCard icon={FileText} label="Solicitudes" value={loading ? '--' : stats.total} color={COLORS.primary} />
-          <StatCard icon={Clock} label="Pendientes" value={loading ? '--' : stats.pending}
+          <StatCard icon={FileText} label="Solicitudes" value={loading ? '--' : stats.total} color={COLORS.primary} to="/requests" />
+          <StatCard icon={Clock} label="Pendientes" to="/requests?status=PENDING" value={loading ? '--' : stats.pending}
             color={COLORS.secondary} trend={stats.pending > 0 ? `${stats.pending}` : undefined} trendUp={false} />
           <StatCard icon={CheckCircle} label="Aprobados" value={loading ? '--' : stats.approved}
-            color={COLORS.primaryLight} trend={stats.approvalRate > 0 ? `${stats.approvalRate}%` : undefined} trendUp={stats.approvalRate > 50} />
-          <StatCard icon={XCircle} label="Rechazados" value={loading ? '--' : stats.rejected}
+            color={COLORS.primaryLight} to="/requests?status=APPROVED" trend={stats.approvalRate > 0 ? `${stats.approvalRate}%` : undefined} trendUp={stats.approvalRate > 50} />
+          <StatCard icon={XCircle} label="Rechazados" to="/requests?status=REJECTED" value={loading ? '--' : stats.rejected}
             color={COLORS.error} trend={stats.rejected > 0 ? `${stats.rejected}` : undefined} trendUp={false} />
           <StatCard icon={Activity} label="Tiempo prom." value={loading ? '--' : `${stats.avgApprovalTime}h`}
             color={COLORS.info} />
@@ -491,6 +500,21 @@ export function DashboardPage() {
           </div>
         )}
       </section>
+
+      {isAdminOrSigner && !loading && stats.pending > 0 && (
+        <Link
+          to="/requests?status=PENDING"
+          className="group flex items-center justify-between gap-4 rounded-2xl bg-secondary-fixed/60 px-5 py-4 text-on-secondary-fixed active:scale-[0.99] transition-transform duration-150"
+        >
+          <span className="text-sm">
+            <strong className="font-bold tabular-nums">{stats.pending}</strong>{' '}
+            {stats.pending === 1 ? 'solicitud espera' : 'solicitudes esperan'} revisión y firma.
+          </span>
+          <span className="inline-flex items-center gap-1.5 text-sm font-semibold">
+            Revisar <ArrowRight size={16} className="transition-transform duration-200 ease-out group-hover:translate-x-0.5" />
+          </span>
+        </Link>
+      )}
 
       {isApplicant ? (
         <>

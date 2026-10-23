@@ -17,6 +17,8 @@ import { Modal } from '../../components/ui/Modal';
 import { extractTemplateVariables, SYSTEM_VARS } from './CreateRequestPage';
 
 const EDITABLE_STATUSES = ['DRAFT', 'PENDING', 'IN_REVIEW', 'REJECTED'];
+// El administrador puede corregir también solicitudes ya aprobadas (vuelven al firmante)
+const ADMIN_EDITABLE_STATUSES = [...EDITABLE_STATUSES, 'APPROVED'];
 
 const statusConfig: Record<string, { label: string; color: string; bg: string; borderColor: string }> = {
   DRAFT: { label: 'Borrador', color: 'text-on-surface-variant', bg: 'bg-surface-variant', borderColor: 'border-surface-variant' },
@@ -36,7 +38,8 @@ export function RequestsPage() {
   const navigate = useNavigate();
   const [requests, setRequests] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
-  const [statusFilter, setStatusFilter] = useState<string>('');
+  // ?status=PENDING permite llegar desde el panel directo a una vista filtrada
+  const [statusFilter, setStatusFilter] = useState<string>(() => new URLSearchParams(window.location.search).get('status') || '');
   const [selected, setSelected] = useState<string | null>(null);
   const [rejectReason, setRejectReason] = useState('');
   const [revokeSelectedId, setRevokeSelectedId] = useState<string | null>(null);
@@ -117,6 +120,19 @@ export function RequestsPage() {
 
   // ── Debounced search ──
   const [searchInput, setSearchInput] = useState('');
+  const searchRef = useRef<HTMLInputElement>(null);
+
+  // "/" enfoca el buscador (salvo que se esté escribiendo en otro campo)
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement;
+      if (e.key !== '/' || e.metaKey || e.ctrlKey || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName) || t.isContentEditable) return;
+      e.preventDefault();
+      searchRef.current?.focus();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -151,12 +167,30 @@ export function RequestsPage() {
       // Status filter
       if (statusFilter) query = query.eq('status', statusFilter);
 
-      // Server-side search via .or()
-      if (debouncedSearch) {
-        const searchTerm = debouncedSearch.trim();
-        query = query.or(
-          `code.ilike.%${searchTerm}%,user.first_name.ilike.%${searchTerm}%,user.last_name.ilike.%${searchTerm}%,template.name.ilike.%${searchTerm}%`
-        );
+      // Búsqueda en servidor. PostgREST no admite filtrar columnas de tablas
+      // relacionadas (user.first_name...) dentro de .or(), así que se resuelven
+      // primero los usuarios y plantillas que coinciden y se filtra por sus ids.
+      const term = debouncedSearch.replace(/[,()*\\%_]/g, ' ').replace(/\s+/g, ' ').trim();
+      if (term) {
+        const like = `%${term}%`;
+        const [usersRes, templatesRes] = await Promise.all([
+          supabase.from('users').select('id')
+            .or(`first_name.ilike.${like},last_name.ilike.${like},email.ilike.${like},document_id.ilike.${like}`)
+            .limit(300),
+          supabase.from('templates').select('id').ilike('name', like).limit(100),
+        ]);
+        const userIds = (usersRes.data || []).map((u: any) => u.id);
+        const templateIds = (templatesRes.data || []).map((t: any) => t.id);
+        const conditions = [
+          `code.ilike.${like}`,
+          `consecutive_number.ilike.${like}`,
+          `verification_code.ilike.${like}`,
+          `data->>nombre_estudiante.ilike.${like}`,
+          `data->>documento_estudiante.ilike.${like}`,
+        ];
+        if (userIds.length) conditions.push(`user_id.in.(${userIds.join(',')})`);
+        if (templateIds.length) conditions.push(`template_id.in.(${templateIds.join(',')})`);
+        query = query.or(conditions.join(','));
       }
 
       // Se traen todas las filas que coinciden con los filtros (con tope de seguridad).
@@ -742,6 +776,7 @@ export function RequestsPage() {
 
   // ── Check if a request status is editable by applicant ──
   const isEditable = (req: any) => {
+    if (user?.role === 'ADMIN') return ADMIN_EDITABLE_STATUSES.includes(req.status);
     return user?.role === 'APPLICANT' && EDITABLE_STATUSES.includes(req.status);
   };
 
@@ -1506,10 +1541,31 @@ export function RequestsPage() {
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <div className="relative flex-1 min-w-[120px] max-w-[200px]">
-            <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-on-surface-variant/50" />
-            <input type="text" placeholder="Buscar..." className="input pl-9 pr-2 w-full text-sm h-10"
-              value={searchInput} onChange={e => setSearchInput(e.target.value)} />
+          <div className="relative flex-1 min-w-[200px] md:w-[360px] md:flex-none">
+            {loading && debouncedSearch ? (
+              <Loader2 size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-primary animate-spin" />
+            ) : (
+              <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-on-surface-variant/50" />
+            )}
+            <input
+              ref={searchRef}
+              type="search"
+              placeholder="Código, nombre, documento, radicado…"
+              aria-label="Buscar solicitudes"
+              className="input pl-9 pr-9 w-full text-sm h-10 [&::-webkit-search-cancel-button]:hidden"
+              value={searchInput}
+              onChange={e => setSearchInput(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Escape') setSearchInput(''); }}
+            />
+            {searchInput ? (
+              <button
+                onClick={() => { setSearchInput(''); searchRef.current?.focus(); }}
+                className="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded-md text-on-surface-variant/60 hover:text-on-surface hover:bg-surface-container-high transition-colors"
+                aria-label="Limpiar búsqueda"
+              ><X size={14} /></button>
+            ) : (
+              <kbd className="hidden md:block absolute right-2.5 top-1/2 -translate-y-1/2 text-[10px] text-on-surface-variant/50 border border-outline-variant rounded px-1.5 py-0.5">/</kbd>
+            )}
           </div>
           <select className="input w-auto min-w-[100px] text-sm h-10" value={statusFilter} onChange={e => { setStatusFilter(e.target.value); setPage(1); }}>
             <option value="">Todos</option>
@@ -1578,8 +1634,23 @@ export function RequestsPage() {
           <SkeletonCard variant="card-sm" count={4} />
         ) : filtered.length === 0 ? (
           <div className="glass-card p-12 rounded-2xl text-center">
-            <p className="text-body-lg text-on-surface-variant">No hay solicitudes</p>
-            <p className="text-body-md text-on-surface-variant/60 mt-1">Las solicitudes aparecerán aquí</p>
+            {debouncedSearch || statusFilter ? (
+              <>
+                <p className="text-body-lg text-on-surface-variant">
+                  Nada coincide{debouncedSearch ? <> con “{debouncedSearch}”</> : null}{statusFilter ? ` en estado ${statusConfig[statusFilter]?.label || statusFilter}` : ''}
+                </p>
+                <p className="text-body-md text-on-surface-variant/60 mt-1">Prueba con el nombre, el documento o parte del código.</p>
+                <button
+                  onClick={() => { setSearchInput(''); setStatusFilter(''); }}
+                  className="btn-secondary btn-sm mt-4"
+                >Quitar filtros</button>
+              </>
+            ) : (
+              <>
+                <p className="text-body-lg text-on-surface-variant">No hay solicitudes</p>
+                <p className="text-body-md text-on-surface-variant/60 mt-1">Las solicitudes aparecerán aquí</p>
+              </>
+            )}
           </div>
         ) : (
           // Las tarjetas visibles ya están deduplicadas y paginadas en `pageEntries`
@@ -1588,7 +1659,7 @@ export function RequestsPage() {
               const req = item.req;
               const status = statusConfig[req.status] || { label: req.status, color: '', bg: '', borderColor: '' };
               return (
-                <div key={req.id} className={`glass-card p-5 rounded-2xl flex flex-col md:flex-row md:items-center gap-4 hover:shadow-md transition-all group border-l-4 ${status.borderColor}`}>
+                <div key={req.id} className={`glass-card p-5 rounded-2xl flex flex-col md:flex-row md:items-center gap-4 [@media(hover:hover)]:hover:shadow-md transition-shadow duration-200 group`}>
                   <div className="flex-1 grid grid-cols-1 md:grid-cols-5 gap-3">
                     <div className="flex flex-col gap-2">
                       {canSelectRequest(req) ? (
@@ -1991,7 +2062,7 @@ export function RequestsPage() {
           return (
             <div key={req.id} className="relative">
               <div
-                className={`flex items-center gap-3 px-5 py-3 hover:bg-surface-container-low/50 transition-colors border-l-4 ${status.borderColor} ${
+                className={`flex items-center gap-3 px-5 py-3 hover:bg-surface-container-low/50 transition-colors ${
                   deleteConfirmId === req.id ? 'opacity-20 pointer-events-none' : ''
                 }`}
               >
@@ -2013,7 +2084,7 @@ export function RequestsPage() {
                           {status.label}
                         </span>
                         <div className="flex items-center gap-1">
-                          {user?.role === 'APPLICANT' && EDITABLE_STATUSES.includes(req.status) && (
+                          {isEditable(req) && (
                             <Link
                               to={`/requests/edit/${req.id}`}
                               onClick={(e) => e.stopPropagation()}

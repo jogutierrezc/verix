@@ -59,6 +59,7 @@ export function CreateRequestPage() {
   const reuseId = searchParams.get('reuse');
   const fileInputRef = useRef<HTMLInputElement>(null);
   const isEditMode = Boolean(editId);
+  const isAdminEdit = isEditMode && user?.role === 'ADMIN';
   const isReuseMode = Boolean(reuseId && !editId);
 
   // Step view state with transition tracking
@@ -85,6 +86,10 @@ export function CreateRequestPage() {
   const [originalBatchId, setOriginalBatchId] = useState<string | null>(null);
   const [originalRejectedId, setOriginalRejectedId] = useState<string | null>(null);
   const [originalRejectionReason, setOriginalRejectionReason] = useState<string | null>(null);
+  // Corrección hecha por un administrador: se devuelve al firmante para nueva validación
+  const [originalData, setOriginalData] = useState<Record<string, string>>({});
+  const [originalStatus, setOriginalStatus] = useState<string | null>(null);
+  const [correctionReason, setCorrectionReason] = useState('');
 
   // Massive import
   const [excelData, setExcelData] = useState<Record<string, string>[]>([]);
@@ -150,15 +155,20 @@ export function CreateRequestPage() {
       const { data, error } = await supabase.from('certificate_requests').select('*').eq('id', editId).single();
       if (error) throw error;
       if (!data) { toast.error('Solicitud no encontrada'); navigate('/requests'); return; }
-      if (data.user_id !== user?.id) { toast.error('No tienes permiso'); navigate('/requests'); return; }
-      const editableStatuses = ['DRAFT', 'PENDING', 'IN_REVIEW', 'REJECTED'];
-      if (!editableStatuses.includes(data.status)) { toast.error('No puede editarse'); navigate('/requests'); return; }
-      setRequestType(data.type === 'MASSIVE' || data.batch_id ? 'multiple' : 'single');
+      const isAdmin = user?.role === 'ADMIN';
+      if (!isAdmin && data.user_id !== user?.id) { toast.error('No tienes permiso'); navigate('/requests'); return; }
+      const editableStatuses = isAdmin ? ['DRAFT', 'PENDING', 'IN_REVIEW', 'REJECTED', 'APPROVED'] : ['DRAFT', 'PENDING', 'IN_REVIEW', 'REJECTED'];
+      if (!editableStatuses.includes(data.status)) { toast.error(data.status === 'SIGNED' ? 'Un documento firmado digitalmente no puede editarse; revócalo y crea uno nuevo.' : 'No puede editarse'); navigate('/requests'); return; }
+      // El administrador corrige una solicitud a la vez, aunque pertenezca a un lote
+      setRequestType(!isAdmin && (data.type === 'MASSIVE' || data.batch_id) ? 'multiple' : 'single');
+      setOriginalStatus(data.status);
+      setOriginalData((data.data && typeof data.data === 'object' ? data.data : {}) as Record<string, string>);
       const template = await resolveTemplate(data.template_id);
       if (template) { setSelectedTemplate(template); handleTemplateSelect(template, false); }
       if (data.data && typeof data.data === 'object') setFormData(data.data as Record<string, string>);
       setOriginalRequestId(editId!);
       if (data.batch_id) setOriginalBatchId(data.batch_id);
+      // Admin: la plantilla no se cambia, se salta directo al formulario
       setCurrentView('ACTION_AREA');
     } catch (err: any) { toast.error('Error al cargar solicitud'); navigate('/requests'); }
   };
@@ -225,7 +235,33 @@ export function CreateRequestPage() {
         return;
       }
       const dataToSend = Object.fromEntries(Object.entries(formData).filter(([, v]) => v !== ''));
-      if (isEditMode && originalRequestId) {
+      if (isAdminEdit && originalRequestId) {
+        if (!correctionReason.trim()) { toast.error('Indica qué se corrigió para que el firmante lo sepa'); setSavingIndividual(false); return; }
+        const changed = Object.keys({ ...originalData, ...dataToSend })
+          .filter(k => String(originalData[k] ?? '') !== String(dataToSend[k] ?? ''));
+        if (changed.length === 0) { toast('No hay cambios que guardar', { icon: 'ℹ️' }); setSavingIndividual(false); return; }
+        // Vuelve a PENDING: el firmante debe validar de nuevo. Se limpian la firma y el PDF anteriores.
+        await requestsApi.update(originalRequestId, {
+          data: dataToSend,
+          status: 'PENDING',
+          rejection_reason: null,
+          reviewed_by: null,
+          reviewed_at: null,
+          reviewer_notes: null,
+          certificate_url: null,
+        });
+        try {
+          const ip = await getClientIP();
+          await auditApi.log({
+            user_id: user?.id, user_email: user?.email, module: 'requests', action: 'correct',
+            entity_id: originalRequestId, entity_type: 'certificate_request', ip_address: ip,
+            old_values: Object.fromEntries(changed.map(k => [k, originalData[k] ?? null])),
+            new_values: Object.fromEntries(changed.map(k => [k, dataToSend[k] ?? null])),
+            description: `Corrección del administrador (estado anterior ${originalStatus}): ${correctionReason.trim()}`,
+          });
+        } catch {}
+        toast.success('Corrección guardada; la solicitud volvió al firmante para validación');
+      } else if (isEditMode && originalRequestId) {
         await requestsApi.update(originalRequestId, { template_id: selectedTemplate.id, data: dataToSend });
         try { const ip = await getClientIP(); await auditApi.log({ user_id: user?.id, user_email: user?.email, module: 'requests', action: 'update', entity_id: originalRequestId, entity_type: 'certificate_request', ip_address: ip, description: 'Solicitud editada' }); } catch {}
         toast.success('Solicitud actualizada');
@@ -601,7 +637,13 @@ export function CreateRequestPage() {
           <div className="flex items-start gap-3">
             <AlertCircle size={20} className="text-amber-600 shrink-0 mt-0.5" />
             <div>
-              <h3 className="text-sm font-bold text-amber-800">{isEditMode ? 'Editando solicitud' : 'Reutilizando datos'}</h3>
+              <h3 className="text-sm font-bold text-amber-800">{isAdminEdit ? 'Corrección de administrador' : isEditMode ? 'Editando solicitud' : 'Reutilizando datos'}</h3>
+              {isAdminEdit && (
+                <p className="text-xs text-amber-700/80 mt-1">
+                  Al guardar, la solicitud vuelve a <strong>Pendiente</strong> y el firmante autorizado deberá validarla otra vez.
+                  {originalStatus === 'APPROVED' && ' La firma y el PDF generados antes se descartan; el radicado se conserva.'}
+                </p>
+              )}
               {originalRejectionReason && <p className="text-xs text-amber-700/80 mt-1">Motivo: {originalRejectionReason}</p>}
             </div>
           </div>
@@ -625,6 +667,23 @@ export function CreateRequestPage() {
 
             {requestType === 'single' ? renderSingleForm() : renderMultipleUpload()}
 
+            {isAdminEdit && (
+              <div className="bg-white p-5 md:p-6 rounded-3xl border border-amber-200">
+                <label htmlFor="correction-reason" className="block text-sm font-semibold text-slate-700 mb-2">
+                  ¿Qué se corrigió? <span className="text-red-500" aria-hidden>*</span>
+                </label>
+                <textarea
+                  id="correction-reason"
+                  rows={3}
+                  value={correctionReason}
+                  onChange={e => setCorrectionReason(e.target.value)}
+                  placeholder="Ej.: se corrigió el número de documento y la intensidad horaria"
+                  className="w-full p-3 rounded-xl border border-gray-200 focus:border-green-500 focus:ring-4 focus:ring-green-50 outline-none text-sm"
+                />
+                <p className="text-xs text-gray-400 mt-1.5">El firmante verá este mensaje al revisar la solicitud.</p>
+              </div>
+            )}
+
             {/* Final actions */}
             <div className="flex flex-col-reverse sm:flex-row items-stretch sm:items-center justify-end gap-3 pt-2 pb-6 md:pb-8 animate-[slideUp_0.4s_ease-out_0.1s_forwards] opacity-0">
               <button onClick={handleBack} className="px-5 py-3 rounded-xl text-gray-600 border border-gray-200 font-medium hover:bg-gray-100 active:bg-gray-200 transition-colors bg-white text-sm md:text-base">Cancelar</button>
@@ -632,7 +691,7 @@ export function CreateRequestPage() {
                 <button onClick={handleIndividualSubmit} disabled={savingIndividual}
                   className="flex items-center justify-center gap-2 px-6 md:px-8 py-3 rounded-xl font-medium transition-all duration-200 bg-green-500 text-white hover:bg-green-600 active:scale-[0.97] disabled:opacity-50 text-sm md:text-base">
                   {savingIndividual ? <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" /> : <Save className="w-4 h-4 md:w-5 md:h-5" />}
-                  {isEditMode ? 'Actualizar' : 'Crear solicitud'}
+                  {isAdminEdit ? 'Guardar y enviar al firmante' : isEditMode ? 'Actualizar' : 'Crear solicitud'}
                 </button>
               ) : (
                 <button onClick={handleImportMassive} disabled={importing || excelData.length === 0}
